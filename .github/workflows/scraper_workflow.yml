@@ -1,0 +1,31 @@
+name: Run Daily AM730 Scraper
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 16 * * *' 
+
+jobs:
+  scrape_and_upload:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9' # Or any other version like '3.10', '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Scraper
+      env:
+        # Map the GitHub secret to the environment variable expected by your script
+        BLOB_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+      run: |
+        python am730_scraper.py
