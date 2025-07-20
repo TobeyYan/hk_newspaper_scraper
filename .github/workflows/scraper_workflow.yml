@@ -26,6 +26,6 @@ jobs:
     - name: Run Scraper
       env:
         # Map the GitHub secret to the environment variable expected by your script
-        BLOB_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+        BLOB_CONNECTION_STRING: ${{ secrets.BLOB_CONNECTION_STRING }}
       run: |
         python am730_scraper.py
