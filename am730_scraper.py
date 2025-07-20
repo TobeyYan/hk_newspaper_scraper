@@ -12,11 +12,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import requests
 import fitz # PyMuPDF library for PDF conversion
-from dotenv import load_dotenv # <--- ADD THIS LINE
-
-# Load environment variables from .env file
-load_dotenv() # <--- ADD THIS LINE
-
 
 # Import Azure storage utility from a parent directory
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
