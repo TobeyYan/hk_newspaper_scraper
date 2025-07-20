@@ -1,0 +1,10 @@
+# Environment variables
+.env
+
+# Python bytecode
+*.pyc
+__pycache__/
+
+# Temporary files
+temp_downloads/
+*.log
