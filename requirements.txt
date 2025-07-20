@@ -1,0 +1,4 @@
+requests
+PyMuPDF
+python-dotenv
+azure-storage-blob
