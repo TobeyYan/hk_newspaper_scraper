@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-START_DATE = datetime(2015, 1, 1) # Changed back to 2015,1,1 to demonstrate quarterly check
+START_DATE = datetime(2015, 1, 3) 
 END_DATE = datetime(2025, 7, 18)
 PUBLISHER_NAME = "am730"
 TEMP_DIR = "temp_downloads"
