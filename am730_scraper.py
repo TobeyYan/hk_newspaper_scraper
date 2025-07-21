@@ -82,17 +82,17 @@ def download_and_convert_pdf(date, azure_client):
     pages_converted = 0
     date_str = date.strftime("%Y-%m-%d")
     base_pdf_url = f"https://flippingbook.am730.com.hk/daily-news/{date_str}/files/assets/common/downloads/page"
-    
-    for page_num in range(1, 201): 
-        time.sleep(1)
+
+    for page_num in range(1, 201): # Assuming max 200 pages per issue
+        # Check if the page already exists in Azure Blob Storage
+        if azure_client.blob_exists(PUBLISHER_NAME, date, page_num, "jpeg"):
+            logger.info(f"Page {page_num:04d} for {date_str} already exists in Azure. Skipping download and conversion.")
+            pages_converted += 1 # Count as processed even if skipped
+            continue # Move to the next page
+
+        time.sleep(0.1) # Adjusted from 0.5s. Adjust if rate limits hit.
         formatted_page_num = f"{page_num:04d}"
         pdf_url = f"{base_pdf_url}{formatted_page_num}.pdf"
-        
-        temp_pdf_name = f"page_{formatted_page_num}.pdf"
-        temp_pdf_path = Path(TEMP_DIR) / temp_pdf_name
-        
-        temp_jpg_name = f"{page_num}.jpeg"
-        temp_jpg_path = Path(TEMP_DIR) / temp_jpg_name
         
         logger.info(f"Attempting to download {pdf_url}")
         
@@ -147,9 +147,15 @@ def download_jpg_pages(date, date_format, azure_client):
     pages_downloaded = 0
     date_str = date.strftime(date_format)
     base_jpg_url = f"https://flippingbook.am730.com.hk/daily-news/{date_str}/files/assets/common/page-html5-substrates/page"
-    
-    for page_num in range(1, 201):
-        time.sleep(1)
+
+    for page_num in range(1, 201): # Assuming max 200 pages per issue
+        # Check if the page already exists in Azure Blob Storage
+        if azure_client.blob_exists(PUBLISHER_NAME, date, page_num, "jpeg"):
+            logger.info(f"Page {page_num:04d} for {date_str} already exists in Azure. Skipping download.")
+            pages_downloaded += 1 # Count as processed even if skipped
+            continue # Move to the next page
+
+        time.sleep(0.1) # Adjusted from 0.5s. Adjust if rate limits hit.
         formatted_page_num = f"{page_num:04d}"
         jpg_url = f"{base_jpg_url}{formatted_page_num}_3.jpg"
         
@@ -160,6 +166,13 @@ def download_jpg_pages(date, date_format, azure_client):
 
         try:
             response = requests.get(jpg_url, stream=True, timeout=10)
+            
+            # --- NEW: Handle 429 Too Many Requests ---
+            if response.status_code == 429:
+                logger.warning(f"Received 429 Too Many Requests for {pdf_url}. Stopping for this issue to avoid further rate limiting.")
+                break # Stop processing this date
+            # --- END NEW ---
+
             
             if response.status_code == 200:
                 with open(temp_jpg_path, 'wb') as f:
@@ -225,6 +238,14 @@ def scrape_issues_main():
             
             try:
                 response = requests.head(check_url, timeout=10)
+
+                # --- NEW: Handle 429 Too Many Requests ---
+                if response.status_code == 429:
+                    logger.warning(f"Received 429 Too Many Requests for {pdf_url}. Stopping for this issue to avoid further rate limiting.")
+                    break # Stop processing this date
+                # --- END NEW ---
+
+                
                 if response.status_code == 200:
                     logger.info(f"Issue found using {format_info['type']} method.")
                     issue_found = True
@@ -244,7 +265,7 @@ def scrape_issues_main():
         
         if i < len(dates) - 1:
             logger.info(f"Waiting 5 seconds before next issue...")
-            time.sleep(5)
+            time.sleep(3)
             
     logger.info("=== am730 E-Paper Scraper Completed ===")
 
