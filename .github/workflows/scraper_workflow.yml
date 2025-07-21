@@ -1,9 +1,15 @@
 name: Run Daily AM730 Scraper
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual triggering
   schedule:
-    - cron: '0 16 * * *' 
+    # Runs every 4 hours, every day.
+    # Example: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+    - cron: '0 */4 * * *' # At minute 0, every 4th hour, every day of the month, every month, every day of the week
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
 
 jobs:
   scrape_and_upload:
