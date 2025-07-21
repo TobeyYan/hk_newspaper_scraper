@@ -221,7 +221,7 @@ def scrape_issues_main():
 
     # --- NEW BLOCK: Find the actual start date using quarterly checks ---
     actual_start_date = START_DATE
-    current_quarter_check_date = datetime(START_DATE.year, ((START_DATE.month - 1) // 3) * 3 + 1, 1)
+    current_quarter_check_date = datetime(START_DATE.year, ((START_DATE.month - 1) // 3) * 3 + 1, 3)
 
     logger.info(f"Starting quarterly check from {current_quarter_check_date.strftime('%Y-%m-%d')}...")
 
