@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-START_DATE = datetime(2015, 7, 3) # Adjusted initial START_DATE as per request
+START_DATE = datetime(2015, 6, 3) # MODIFIED: Adjusted initial START_DATE as per request
 END_DATE = datetime(2025, 7, 18)
 PUBLISHER_NAME = "am730"
 TEMP_DIR = "temp_downloads"
@@ -42,6 +42,31 @@ def find_next_weekday(date):
         date += timedelta(days=1)
     return date
 # --- END NEW HELPER FUNCTION ---
+
+# --- NEW HELPER FUNCTION: Get date after N months and find next weekday ---
+def get_date_after_n_months_and_find_weekday(date, n_months):
+    """
+    Calculates a date N months after the given date,
+    and then finds the next immediate weekday for that calculated date.
+    Handles month rollovers and day overflows (e.g., Jan 31 + 1 month = Feb 28/29).
+    """
+    target_date = date
+    for _ in range(n_months):
+        # Add a month, handling year rollover
+        if target_date.month == 12:
+            target_date = datetime(target_date.year + 1, 1, target_date.day)
+        else:
+            target_date = datetime(target_date.year, target_date.month + 1, target_date.day)
+        
+        # Handle day overflow (e.g., Jan 31 + 1 month = Feb 28/29)
+        # Calculate the last day of the target month
+        last_day_of_month = (target_date.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        if target_date.day > last_day_of_month.day:
+            target_date = target_date.replace(day=last_day_of_month.day)
+
+    return find_next_weekday(target_date)
+# --- END NEW HELPER FUNCTION ---
+
 
 def get_date_range(start_date, end_date):
     """Generates a list of weekday dates to scrape."""
@@ -230,53 +255,68 @@ def scrape_issues_main():
     # --- MODIFIED BLOCK: Smarter quarterly check for actual_start_date ---
     actual_start_date = START_DATE
     
-    # Start the quarterly check from the exact START_DATE specified in config
-    current_check_date = START_DATE 
+    # Initialize the date for the current quarter's first check point
+    # Ensure it's a weekday from the START_DATE
+    quarterly_scan_date = find_next_weekday(START_DATE) 
 
-    logger.info(f"Starting smarter quarterly check from {current_check_date.strftime('%Y-%m-%d')}...")
+    logger.info(f"Starting smarter quarterly check from {quarterly_scan_date.strftime('%Y-%m-%d')}...")
 
-    while current_check_date <= END_DATE:
-        # Ensure current_check_date is a weekday
-        current_check_date = find_next_weekday(current_check_date)
-        if current_check_date > END_DATE:
-            break # No more weekdays to check
+    while quarterly_scan_date <= END_DATE:
+        # Date 1: The current quarterly scan point (already a weekday)
+        date1 = quarterly_scan_date
 
-        # Calculate the next date for the two-date check (next weekday)
-        next_check_date = current_check_date + timedelta(days=1)
-        next_check_date = find_next_weekday(next_check_date)
+        # Date 2: 3 months after date1, adjusted to the nearest weekday
+        date2 = get_date_after_n_months_and_find_weekday(date1, 3)
+
+        # Ensure date2 does not exceed END_DATE for the check
+        # If date2 is beyond END_DATE, we treat it as "exists" to stop the quarterly scan
+        # and start detailed scan from date1 up to END_DATE.
+        # This handles the case where the remaining period is less than 3 months.
+        check_date2_for_existence = date2
+        if date2 > END_DATE:
+            check_date2_for_existence = END_DATE # Cap for existence check
+            # If END_DATE is not a weekday, find the last weekday before or at END_DATE
+            # This is to ensure the existence check is on a plausible date.
+            if not is_weekday(check_date2_for_existence):
+                temp_date = END_DATE
+                while temp_date >= START_DATE and not is_weekday(temp_date):
+                    temp_date -= timedelta(days=1)
+                check_date2_for_existence = temp_date
+            if check_date2_for_existence < START_DATE: # Prevent going before START_DATE
+                check_date2_for_existence = START_DATE
+
 
         # Check existence of page 1 for both dates
-        current_date_exists = azure_client.blob_exists(PUBLISHER_NAME, current_check_date, 1, "jpeg")
-        next_date_exists = azure_client.blob_exists(PUBLISHER_NAME, next_check_date, 1, "jpeg") if next_check_date <= END_DATE else True # Treat beyond END_DATE as existing to stop early
+        exists1 = azure_client.blob_exists(PUBLISHER_NAME, date1, 1, "jpeg")
+        exists2 = azure_client.blob_exists(PUBLISHER_NAME, check_date2_for_existence, 1, "jpeg") if check_date2_for_existence >= date1 else True # If check_date2 is before date1 (due to END_DATE capping), assume exists to break loop effectively
 
-        logger.info(f"Quarterly check: {current_check_date.strftime('%Y-%m-%d')} (exists: {current_date_exists}) | {next_check_date.strftime('%Y-%m-%d')} (exists: {next_date_exists})")
+        logger.info(f"Quarterly check: {date1.strftime('%Y-%m-%d')} (exists: {exists1}) | {check_date2_for_existence.strftime('%Y-%m-%d')} (exists: {exists2})")
 
         # Logic for two-date check
-        if current_date_exists and next_date_exists:
-            # Both exist, so this quarter (or segment) is processed. Move to next quarter.
-            actual_start_date = next_check_date # Update to the later date as the last confirmed point
+        if exists1 and exists2:
+            # Both exist, so this segment is processed. Advance quarterly_scan_date.
+            actual_start_date = check_date2_for_existence # Last confirmed processed date
             
-            # Calculate the first day of the quarter *after* current_check_date
-            # Add 3 months to current_check_date, then set day to 1
-            next_quarter_month = current_check_date.month + 3
-            next_quarter_year = current_check_date.year
-            if next_quarter_month > 12:
-                next_quarter_month -= 12
-                next_quarter_year += 1
-            
-            current_check_date = datetime(next_quarter_year, next_quarter_month, 1)
-            # Ensure the new current_check_date (start of next quarter) is also a weekday
-            current_check_date = find_next_weekday(current_check_date)
+            # Move quarterly_scan_date to the start of the next 3-month block after date1
+            # Calculate the first day of the month 3 months after date1's month
+            quarterly_scan_date = get_date_after_n_months_and_find_weekday(date1, 3)
 
-        else:
-            # Either current_date_exists is False, or current_date_exists is True but next_date_exists is False.
-            # This means we've found the gap. Start detailed scan from current_check_date.
-            actual_start_date = current_check_date
-            logger.info(f"Gap found. Detailed scraping will start from: {actual_start_date.strftime('%Y-%m-%d')}")
-            break # Break out of the quarterly check loop
+        elif exists1 and not exists2:
+            # Gap found within this 3-month block (date1 exists, date2 doesn't)
+            # Start detailed daily scan from date1
+            actual_start_date = date1
+            logger.info(f"Gap found: {date1.strftime('%Y-%m-%d')} exists, but {check_date2_for_existence.strftime('%Y-%m-%d')} does not. Detailed scraping will start from: {actual_start_date.strftime('%Y-%m-%d')}")
+            break # Break out of quarterly check loop
+
+        else: # not exists1
+            # Gap found before or at date1. Start detailed daily scan from date1.
+            actual_start_date = date1
+            logger.info(f"Gap found: {date1.strftime('%Y-%m-%d')} does not exist. Detailed scraping will start from: {actual_start_date.strftime('%Y-%m-%d')}")
+            break # Break out of quarterly check loop
 
     # Final adjustment if the loop completed without finding a gap (meaning all is processed)
-    if current_check_date > END_DATE and actual_start_date == END_DATE:
+    # This condition means quarterly_scan_date has gone past END_DATE and the last segment was fully processed.
+    if actual_start_date >= END_DATE: # If actual_start_date reached or passed END_DATE
         logger.info("All relevant dates appear to be processed based on smarter quarterly check.")
         return # Exit if all done
 
@@ -315,7 +355,7 @@ def scrape_issues_main():
                 # Handle 429 Too Many Requests using check_url
                 if response.status_code == 429:
                     logger.warning(f"Received 429 Too Many Requests for {check_url}. Stopping for this issue to avoid further rate limiting.")
-                    issue_found = False # Important: Set this to False to prevent attempting download
+                    issue_found = False # Important: Set this to False so it doesn't try to download
                     break # Stop trying formats for this date and move to next date
 
                 if response.status_code == 200:
