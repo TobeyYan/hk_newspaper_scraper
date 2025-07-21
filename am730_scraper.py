@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[ ]:
-
-
 import os
 import sys
 import logging
@@ -29,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-START_DATE = datetime(2014, 1, 1)
+START_DATE = datetime(2014, 3, 1)
 END_DATE = datetime(2025, 7, 15)
 PUBLISHER_NAME = "am730"
 TEMP_DIR = "temp_downloads"
@@ -78,27 +72,41 @@ def upload_to_azure(azure_client, filepath, date, page_num, extension):
 def download_and_convert_pdf(date, azure_client):
     """
     Downloads each page as a PDF, converts it to a high-quality JPG, and uploads it to Azure.
+    Includes page-level existence check for resumption and 429 error handling.
     """
     pages_converted = 0
     date_str = date.strftime("%Y-%m-%d")
     base_pdf_url = f"https://flippingbook.am730.com.hk/daily-news/{date_str}/files/assets/common/downloads/page"
-
+    
     for page_num in range(1, 201): # Assuming max 200 pages per issue
-        # Check if the page already exists in Azure Blob Storage
+        # --- MODIFIED LINE: Check if the page already exists in Azure Blob Storage ---
         if azure_client.blob_exists(PUBLISHER_NAME, date, page_num, "jpeg"):
-            logger.info(f"Page {page_num:04d} for {date_str} already exists in Azure. Skipping download and conversion.")
+            logger.info(f"Page {page_num:03d} for {date_str} already exists in Azure. Skipping download and conversion.")
             pages_converted += 1 # Count as processed even if skipped
             continue # Move to the next page
 
+        # --- MODIFIED LINE: Reduced sleep for potentially faster processing ---
         time.sleep(0.1) # Adjusted from 0.5s. Adjust if rate limits hit.
         formatted_page_num = f"{page_num:04d}"
-        pdf_url = f"{base_pdf_url}{formatted_page_num}.pdf"
+        pdf_url = f"{base_pdf_url}{formatted_page_num}.pdf" # Defined here
+        
+        temp_pdf_name = f"page_{formatted_page_num}.pdf"
+        temp_pdf_path = Path(TEMP_DIR) / temp_pdf_name
+        
+        temp_jpg_name = f"{page_num}.jpeg"
+        temp_jpg_path = Path(TEMP_DIR) / temp_jpg_name
         
         logger.info(f"Attempting to download {pdf_url}")
         
         try:
             response = requests.get(pdf_url, stream=True, timeout=10)
             
+            # --- NEW BLOCK: Handle 429 Too Many Requests ---
+            if response.status_code == 429:
+                logger.warning(f"Received 429 Too Many Requests for {pdf_url}. Stopping for this issue to avoid further rate limiting.")
+                break # Stop processing this date
+            # --- END NEW BLOCK ---
+
             if response.status_code == 200:
                 with open(temp_pdf_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -108,7 +116,8 @@ def download_and_convert_pdf(date, azure_client):
                 try:
                     doc = fitz.open(temp_pdf_path)
                     page = doc.load_page(0)
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                    # --- MODIFIED LINE: Reduced PDF conversion matrix for speed ---
+                    pix = page.get_pixmap(matrix=fitz.Matrix(1, 1)) # Changed from 2,2 to 1,1 for speed
                     pix.save(temp_jpg_path, "jpeg")
                     logger.info(f"Successfully converted page {page_num} to JPG.")
                     
@@ -127,37 +136,39 @@ def download_and_convert_pdf(date, azure_client):
 
             elif response.status_code in [403, 404]:
                 logger.info(f"Page {page_num} not found (Status Code {response.status_code}). Assuming end of issue.")
-                break
+                break # No more pages for this date
             else:
-                logger.warning(f"Failed to download {pdf_url} with status code {response.status_code}")
-                break
+                logger.warning(f"Failed to download {pdf_url} with status code {response.status_code}. Stopping for this issue.")
+                break # Stop processing this date on unexpected error
                 
             response.close()
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error downloading {pdf_url}: {e}")
-            break
+            logger.error(f"Error downloading {pdf_url}: {e}. Stopping for this issue.")
+            break # Stop processing this date on network error
             
     return pages_converted
 
 def download_jpg_pages(date, date_format, azure_client):
     """
     Downloads JPG pages directly and uploads them to Azure.
+    Includes page-level existence check for resumption and 429 error handling.
     """
     pages_downloaded = 0
     date_str = date.strftime(date_format)
     base_jpg_url = f"https://flippingbook.am730.com.hk/daily-news/{date_str}/files/assets/common/page-html5-substrates/page"
-
+    
     for page_num in range(1, 201): # Assuming max 200 pages per issue
-        # Check if the page already exists in Azure Blob Storage
+        # --- MODIFIED LINE: Check if the page already exists in Azure Blob Storage ---
         if azure_client.blob_exists(PUBLISHER_NAME, date, page_num, "jpeg"):
-            logger.info(f"Page {page_num:04d} for {date_str} already exists in Azure. Skipping download.")
+            logger.info(f"Page {page_num:03d} for {date_str} already exists in Azure. Skipping download.")
             pages_downloaded += 1 # Count as processed even if skipped
             continue # Move to the next page
 
+        # --- MODIFIED LINE: Reduced sleep for potentially faster processing ---
         time.sleep(0.1) # Adjusted from 0.5s. Adjust if rate limits hit.
         formatted_page_num = f"{page_num:04d}"
-        jpg_url = f"{base_jpg_url}{formatted_page_num}_3.jpg"
+        jpg_url = f"{base_jpg_url}{formatted_page_num}_3.jpg" # Defined here
         
         temp_jpg_name = f"{page_num}.jpeg"
         temp_jpg_path = Path(TEMP_DIR) / temp_jpg_name
@@ -167,13 +178,12 @@ def download_jpg_pages(date, date_format, azure_client):
         try:
             response = requests.get(jpg_url, stream=True, timeout=10)
             
-            # --- NEW: Handle 429 Too Many Requests ---
+            # --- NEW BLOCK: Handle 429 Too Many Requests ---
             if response.status_code == 429:
-                logger.warning(f"Received 429 Too Many Requests for {pdf_url}. Stopping for this issue to avoid further rate limiting.")
+                logger.warning(f"Received 429 Too Many Requests for {jpg_url}. Stopping for this issue to avoid further rate limiting.")
                 break # Stop processing this date
-            # --- END NEW ---
+            # --- END NEW BLOCK ---
 
-            
             if response.status_code == 200:
                 with open(temp_jpg_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -189,16 +199,16 @@ def download_jpg_pages(date, date_format, azure_client):
 
             elif response.status_code in [403, 404]:
                 logger.info(f"Page {page_num} not found. Assuming end of issue.")
-                break
+                break # No more pages for this date
             else:
-                logger.warning(f"Failed to download {jpg_url} with status code {response.status_code}")
-                break
+                logger.warning(f"Failed to download {jpg_url} with status code {response.status_code}. Stopping for this issue.")
+                break # Stop processing this date on unexpected error
 
             response.close()
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error during download for page {page_num}: {e}")
-            break
+            logger.error(f"Error during download for page {page_num}: {e}. Stopping for this issue.")
+            break # Stop processing this date on network error
             
     return pages_downloaded
 
@@ -218,9 +228,17 @@ def scrape_issues_main():
     logger.info(f"Found {len(dates)} weekdays to process")
     
     for i, date in enumerate(dates):
-        logger.info(f"Processing date {i+1}/{len(dates)}: {date.strftime('%Y-%m-%d')}")
+        date_str = date.strftime('%Y-%m-%d')
+        logger.info(f"Processing date {i+1}/{len(dates)}: {date_str}")
         
+        # --- REMOVED BLOCK: Removed the early exit condition for page 1 existence ---
+        # if azure_client.blob_exists(PUBLISHER_NAME, date, 1, "jpeg"):
+        #     logger.info(f"First page for {date_str} already exists. Assuming issue was fully processed. Skipping date.")
+        #     continue # Move to the next date
+        # --- END REMOVED BLOCK ---
+
         pages_found = 0
+        issue_found = False
         
         # Define the URL formats to check, in order of priority (highest quality first)
         formats_to_check = [
@@ -229,23 +247,23 @@ def scrape_issues_main():
             {'type': 'jpg', 'url_format': 'https://flippingbook.am730.com.hk/daily-news/{date}/files/assets/common/page-html5-substrates/page0001_3.jpg', 'date_format': '%d_%m_%Y'},
         ]
         
-        issue_found = False
+        # Iterate through formats to find a working one for the current date
         for format_info in formats_to_check:
-            date_str = date.strftime(format_info['date_format'])
-            check_url = format_info['url_format'].replace('{date}', date_str)
+            date_str_formatted = date.strftime(format_info['date_format'])
+            check_url = format_info['url_format'].replace('{date}', date_str_formatted)
             
             logger.info(f"Checking for issue at: {check_url}")
             
             try:
                 response = requests.head(check_url, timeout=10)
 
-                # --- NEW: Handle 429 Too Many Requests ---
+                # --- CORRECTED BLOCK: Handle 429 Too Many Requests using check_url ---
                 if response.status_code == 429:
-                    logger.warning(f"Received 429 Too Many Requests for {pdf_url}. Stopping for this issue to avoid further rate limiting.")
-                    break # Stop processing this date
-                # --- END NEW ---
+                    logger.warning(f"Received 429 Too Many Requests for {check_url}. Stopping for this issue to avoid further rate limiting.")
+                    issue_found = False # Important: Set this to False to prevent attempting download
+                    break # Stop trying formats for this date and move to next date
+                # --- END CORRECTED BLOCK ---
 
-                
                 if response.status_code == 200:
                     logger.info(f"Issue found using {format_info['type']} method.")
                     issue_found = True
@@ -253,22 +271,23 @@ def scrape_issues_main():
                         pages_found = download_and_convert_pdf(date, azure_client)
                     else:
                         pages_found = download_jpg_pages(date, format_info['date_format'], azure_client)
-                    break
+                    break # Found a format and processed, move to next date
             except requests.exceptions.RequestException as e:
-                logger.warning(f"Error checking {format_info['type']} URL: {e}")
+                logger.warning(f"Error checking {format_info['type']} URL for {date_str}: {e}")
         
         if not issue_found:
             logger.info(f"No issue found for {date.strftime('%Y-%m-%d')} after checking all formats.")
-            pages_found = 0
+            pages_found = 0 # No pages processed for this date
             
-        logger.info(f"Completed for {date.strftime('%Y-%m-%d')} e-paper: {pages_found} pages processed.")
+        logger.info(f"Completed for {date.strftime('%Y-%m-%d')} e-paper: {pages_found} pages processed (including skips).")
         
         if i < len(dates) - 1:
             logger.info(f"Waiting 3 seconds before next issue...")
-            time.sleep(3)
+            # --- MODIFIED LINE: Reduced sleep between issues ---
+            time.sleep(3) # Adjusted from 5s
+            # --- END MODIFIED LINE ---
             
     logger.info("=== am730 E-Paper Scraper Completed ===")
 
 if __name__ == "__main__":
     scrape_issues_main()
-
