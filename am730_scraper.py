@@ -264,7 +264,7 @@ def scrape_issues_main():
         logger.info(f"Completed for {date.strftime('%Y-%m-%d')} e-paper: {pages_found} pages processed.")
         
         if i < len(dates) - 1:
-            logger.info(f"Waiting 5 seconds before next issue...")
+            logger.info(f"Waiting 3 seconds before next issue...")
             time.sleep(3)
             
     logger.info("=== am730 E-Paper Scraper Completed ===")
