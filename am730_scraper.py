@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-START_DATE = datetime(2014, 5, 29)
+START_DATE = datetime(2015, 1, 1) # Changed back to 2015,1,1 to demonstrate quarterly check
 END_DATE = datetime(2025, 7, 18)
 PUBLISHER_NAME = "am730"
 TEMP_DIR = "temp_downloads"
@@ -79,13 +79,12 @@ def download_and_convert_pdf(date, azure_client):
     base_pdf_url = f"https://flippingbook.am730.com.hk/daily-news/{date_str}/files/assets/common/downloads/page"
     
     for page_num in range(1, 201): # Assuming max 200 pages per issue
-        # --- MODIFIED LINE: Check if the page already exists in Azure Blob Storage ---
+        # Check if the page already exists in Azure Blob Storage
         if azure_client.blob_exists(PUBLISHER_NAME, date, page_num, "jpeg"):
             logger.info(f"Page {page_num:03d} for {date_str} already exists in Azure. Skipping download and conversion.")
             pages_converted += 1 # Count as processed even if skipped
             continue # Move to the next page
 
-        # --- MODIFIED LINE: Reduced sleep for potentially faster processing ---
         time.sleep(0.1) # Adjusted from 0.5s. Adjust if rate limits hit.
         formatted_page_num = f"{page_num:04d}"
         pdf_url = f"{base_pdf_url}{formatted_page_num}.pdf" # Defined here
@@ -101,11 +100,10 @@ def download_and_convert_pdf(date, azure_client):
         try:
             response = requests.get(pdf_url, stream=True, timeout=10)
             
-            # --- NEW BLOCK: Handle 429 Too Many Requests ---
+            # Handle 429 Too Many Requests
             if response.status_code == 429:
                 logger.warning(f"Received 429 Too Many Requests for {pdf_url}. Stopping for this issue to avoid further rate limiting.")
                 break # Stop processing this date
-            # --- END NEW BLOCK ---
 
             if response.status_code == 200:
                 with open(temp_pdf_path, 'wb') as f:
@@ -116,7 +114,6 @@ def download_and_convert_pdf(date, azure_client):
                 try:
                     doc = fitz.open(temp_pdf_path)
                     page = doc.load_page(0)
-                    # --- MODIFIED LINE: Reduced PDF conversion matrix for speed ---
                     pix = page.get_pixmap(matrix=fitz.Matrix(1, 1)) # Changed from 2,2 to 1,1 for speed
                     pix.save(temp_jpg_path, "jpeg")
                     logger.info(f"Successfully converted page {page_num} to JPG.")
@@ -159,13 +156,12 @@ def download_jpg_pages(date, date_format, azure_client):
     base_jpg_url = f"https://flippingbook.am730.com.hk/daily-news/{date_str}/files/assets/common/page-html5-substrates/page"
     
     for page_num in range(1, 201): # Assuming max 200 pages per issue
-        # --- MODIFIED LINE: Check if the page already exists in Azure Blob Storage ---
+        # Check if the page already exists in Azure Blob Storage
         if azure_client.blob_exists(PUBLISHER_NAME, date, page_num, "jpeg"):
             logger.info(f"Page {page_num:03d} for {date_str} already exists in Azure. Skipping download.")
             pages_downloaded += 1 # Count as processed even if skipped
             continue # Move to the next page
 
-        # --- MODIFIED LINE: Reduced sleep for potentially faster processing ---
         time.sleep(0.1) # Adjusted from 0.5s. Adjust if rate limits hit.
         formatted_page_num = f"{page_num:04d}"
         jpg_url = f"{base_jpg_url}{formatted_page_num}_3.jpg" # Defined here
@@ -178,11 +174,10 @@ def download_jpg_pages(date, date_format, azure_client):
         try:
             response = requests.get(jpg_url, stream=True, timeout=10)
             
-            # --- NEW BLOCK: Handle 429 Too Many Requests ---
+            # Handle 429 Too Many Requests
             if response.status_code == 429:
                 logger.warning(f"Received 429 Too Many Requests for {jpg_url}. Stopping for this issue to avoid further rate limiting.")
                 break # Stop processing this date
-            # --- END NEW BLOCK ---
 
             if response.status_code == 200:
                 with open(temp_jpg_path, 'wb') as f:
@@ -224,19 +219,62 @@ def scrape_issues_main():
         logger.error(f"Failed to initialize Azure storage: {e}")
         return
 
-    dates = list(get_date_range(START_DATE, END_DATE))
-    logger.info(f"Found {len(dates)} weekdays to process")
-    
-    for i, date in enumerate(dates):
-        date_str = date.strftime('%Y-%m-%d')
-        logger.info(f"Processing date {i+1}/{len(dates)}: {date_str}")
-        
-        # --- REMOVED BLOCK: Removed the early exit condition for page 1 existence ---
-        # if azure_client.blob_exists(PUBLISHER_NAME, date, 1, "jpeg"):
-        #     logger.info(f"First page for {date_str} already exists. Assuming issue was fully processed. Skipping date.")
-        #     continue # Move to the next date
-        # --- END REMOVED BLOCK ---
+    # --- NEW BLOCK: Find the actual start date using quarterly checks ---
+    actual_start_date = START_DATE
+    current_quarter_check_date = datetime(START_DATE.year, ((START_DATE.month - 1) // 3) * 3 + 1, 1)
 
+    logger.info(f"Starting quarterly check from {current_quarter_check_date.strftime('%Y-%m-%d')}...")
+
+    while current_quarter_check_date <= END_DATE:
+        # Ensure it's a weekday for the check
+        check_date = current_quarter_check_date
+        while not is_weekday(check_date) and check_date <= END_DATE:
+            check_date += timedelta(days=1)
+        
+        if check_date > END_DATE: # If we've gone past END_DATE looking for a weekday
+            break
+
+        # Check if page 1 of this quarter's first weekday exists in Azure
+        if azure_client.blob_exists(PUBLISHER_NAME, check_date, 1, "jpeg"):
+            logger.info(f"Page 1 for {check_date.strftime('%Y-%m-%d')} (quarterly check) exists. Assuming this quarter is processed.")
+            actual_start_date = check_date # Update actual_start_date to this point
+            
+            # Move to the first day of the next quarter
+            if current_quarter_check_date.month == 10:
+                current_quarter_check_date = datetime(current_quarter_check_date.year + 1, 1, 1)
+            else:
+                current_quarter_check_date = datetime(current_quarter_check_date.year, current_quarter_check_date.month + 3, 1)
+        else:
+            logger.info(f"Page 1 for {check_date.strftime('%Y-%m-%d')} (quarterly check) does NOT exist. Starting detailed scan from the previous known point.")
+            break # Found the gap, break out of quarterly loop
+
+    # Adjust actual_start_date to be the day after the last found full date,
+    # or the original START_DATE if no quarter was found fully processed.
+    # If actual_start_date was updated, we need to move it to the next day to start scraping.
+    # If it's still the original START_DATE, we start from there.
+    if actual_start_date != START_DATE:
+        # Find the first weekday after the last found processed date
+        next_day = actual_start_date + timedelta(days=1)
+        while not is_weekday(next_day) and next_day <= END_DATE:
+            next_day += timedelta(days=1)
+        if next_day <= END_DATE:
+            actual_start_date = next_day
+        else: # All dates processed or no more weekdays
+            logger.info("All relevant dates appear to be processed based on quarterly check.")
+            return # Exit if all done
+
+    logger.info(f"Actual scraping will start from: {actual_start_date.strftime('%Y-%m-%d')}")
+    # --- END NEW BLOCK ---
+
+    # --- MODIFIED LINE: Generate dates from the actual_start_date ---
+    dates_to_process = list(get_date_range(actual_start_date, END_DATE))
+    logger.info(f"Found {len(dates_to_process)} weekdays to process from {actual_start_date.strftime('%Y-%m-%d')} to {END_DATE.strftime('%Y-%m-%d')}")
+    
+    # --- MODIFIED LOOP: Iterate over dates_to_process ---
+    for i, date in enumerate(dates_to_process):
+        date_str = date.strftime('%Y-%m-%d')
+        logger.info(f"Processing date {i+1}/{len(dates_to_process)}: {date_str}")
+        
         pages_found = 0
         issue_found = False
         
@@ -257,12 +295,11 @@ def scrape_issues_main():
             try:
                 response = requests.head(check_url, timeout=10)
 
-                # --- CORRECTED BLOCK: Handle 429 Too Many Requests using check_url ---
+                # Handle 429 Too Many Requests using check_url
                 if response.status_code == 429:
                     logger.warning(f"Received 429 Too Many Requests for {check_url}. Stopping for this issue to avoid further rate limiting.")
                     issue_found = False # Important: Set this to False to prevent attempting download
                     break # Stop trying formats for this date and move to next date
-                # --- END CORRECTED BLOCK ---
 
                 if response.status_code == 200:
                     logger.info(f"Issue found using {format_info['type']} method.")
@@ -281,11 +318,9 @@ def scrape_issues_main():
             
         logger.info(f"Completed for {date.strftime('%Y-%m-%d')} e-paper: {pages_found} pages processed (including skips).")
         
-        if i < len(dates) - 1:
+        if i < len(dates_to_process) - 1: # MODIFIED: Use dates_to_process here
             logger.info(f"Waiting 3 seconds before next issue...")
-            # --- MODIFIED LINE: Reduced sleep between issues ---
-            time.sleep(3) # Adjusted from 5s
-            # --- END MODIFIED LINE ---
+            time.sleep(3)
             
     logger.info("=== am730 E-Paper Scraper Completed ===")
 
