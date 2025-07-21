@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-START_DATE = datetime(2015, 1, 3) 
+START_DATE = datetime(2015, 7, 3) # Adjusted initial START_DATE as per request
 END_DATE = datetime(2025, 7, 18)
 PUBLISHER_NAME = "am730"
 TEMP_DIR = "temp_downloads"
@@ -34,6 +34,14 @@ Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
 def is_weekday(date):
     """Checks if a date is a weekday (Monday=0, Sunday=6)."""
     return date.weekday() < 5
+
+# --- NEW HELPER FUNCTION: Find the next weekday ---
+def find_next_weekday(date):
+    """Finds the next immediate weekday from a given date."""
+    while not is_weekday(date):
+        date += timedelta(days=1)
+    return date
+# --- END NEW HELPER FUNCTION ---
 
 def get_date_range(start_date, end_date):
     """Generates a list of weekday dates to scrape."""
@@ -219,52 +227,61 @@ def scrape_issues_main():
         logger.error(f"Failed to initialize Azure storage: {e}")
         return
 
-    # --- NEW BLOCK: Find the actual start date using quarterly checks ---
+    # --- MODIFIED BLOCK: Smarter quarterly check for actual_start_date ---
     actual_start_date = START_DATE
-    current_quarter_check_date = datetime(START_DATE.year, ((START_DATE.month - 1) // 3) * 3 + 1, 3)
+    
+    # Start the quarterly check from the exact START_DATE specified in config
+    current_check_date = START_DATE 
 
-    logger.info(f"Starting quarterly check from {current_quarter_check_date.strftime('%Y-%m-%d')}...")
+    logger.info(f"Starting smarter quarterly check from {current_check_date.strftime('%Y-%m-%d')}...")
 
-    while current_quarter_check_date <= END_DATE:
-        # Ensure it's a weekday for the check
-        check_date = current_quarter_check_date
-        while not is_weekday(check_date) and check_date <= END_DATE:
-            check_date += timedelta(days=1)
-        
-        if check_date > END_DATE: # If we've gone past END_DATE looking for a weekday
-            break
+    while current_check_date <= END_DATE:
+        # Ensure current_check_date is a weekday
+        current_check_date = find_next_weekday(current_check_date)
+        if current_check_date > END_DATE:
+            break # No more weekdays to check
 
-        # Check if page 1 of this quarter's first weekday exists in Azure
-        if azure_client.blob_exists(PUBLISHER_NAME, check_date, 1, "jpeg"):
-            logger.info(f"Page 1 for {check_date.strftime('%Y-%m-%d')} (quarterly check) exists. Assuming this quarter is processed.")
-            actual_start_date = check_date # Update actual_start_date to this point
+        # Calculate the next date for the two-date check (next weekday)
+        next_check_date = current_check_date + timedelta(days=1)
+        next_check_date = find_next_weekday(next_check_date)
+
+        # Check existence of page 1 for both dates
+        current_date_exists = azure_client.blob_exists(PUBLISHER_NAME, current_check_date, 1, "jpeg")
+        next_date_exists = azure_client.blob_exists(PUBLISHER_NAME, next_check_date, 1, "jpeg") if next_check_date <= END_DATE else True # Treat beyond END_DATE as existing to stop early
+
+        logger.info(f"Quarterly check: {current_check_date.strftime('%Y-%m-%d')} (exists: {current_date_exists}) | {next_check_date.strftime('%Y-%m-%d')} (exists: {next_date_exists})")
+
+        # Logic for two-date check
+        if current_date_exists and next_date_exists:
+            # Both exist, so this quarter (or segment) is processed. Move to next quarter.
+            actual_start_date = next_check_date # Update to the later date as the last confirmed point
             
-            # Move to the first day of the next quarter
-            if current_quarter_check_date.month == 10:
-                current_quarter_check_date = datetime(current_quarter_check_date.year + 1, 1, 1)
-            else:
-                current_quarter_check_date = datetime(current_quarter_check_date.year, current_quarter_check_date.month + 3, 1)
-        else:
-            logger.info(f"Page 1 for {check_date.strftime('%Y-%m-%d')} (quarterly check) does NOT exist. Starting detailed scan from the previous known point.")
-            break # Found the gap, break out of quarterly loop
+            # Calculate the first day of the quarter *after* current_check_date
+            # Add 3 months to current_check_date, then set day to 1
+            next_quarter_month = current_check_date.month + 3
+            next_quarter_year = current_check_date.year
+            if next_quarter_month > 12:
+                next_quarter_month -= 12
+                next_quarter_year += 1
+            
+            current_check_date = datetime(next_quarter_year, next_quarter_month, 1)
+            # Ensure the new current_check_date (start of next quarter) is also a weekday
+            current_check_date = find_next_weekday(current_check_date)
 
-    # Adjust actual_start_date to be the day after the last found full date,
-    # or the original START_DATE if no quarter was found fully processed.
-    # If actual_start_date was updated, we need to move it to the next day to start scraping.
-    # If it's still the original START_DATE, we start from there.
-    if actual_start_date != START_DATE:
-        # Find the first weekday after the last found processed date
-        next_day = actual_start_date + timedelta(days=1)
-        while not is_weekday(next_day) and next_day <= END_DATE:
-            next_day += timedelta(days=1)
-        if next_day <= END_DATE:
-            actual_start_date = next_day
-        else: # All dates processed or no more weekdays
-            logger.info("All relevant dates appear to be processed based on quarterly check.")
-            return # Exit if all done
+        else:
+            # Either current_date_exists is False, or current_date_exists is True but next_date_exists is False.
+            # This means we've found the gap. Start detailed scan from current_check_date.
+            actual_start_date = current_check_date
+            logger.info(f"Gap found. Detailed scraping will start from: {actual_start_date.strftime('%Y-%m-%d')}")
+            break # Break out of the quarterly check loop
+
+    # Final adjustment if the loop completed without finding a gap (meaning all is processed)
+    if current_check_date > END_DATE and actual_start_date == END_DATE:
+        logger.info("All relevant dates appear to be processed based on smarter quarterly check.")
+        return # Exit if all done
 
     logger.info(f"Actual scraping will start from: {actual_start_date.strftime('%Y-%m-%d')}")
-    # --- END NEW BLOCK ---
+    # --- END MODIFIED BLOCK ---
 
     # --- MODIFIED LINE: Generate dates from the actual_start_date ---
     dates_to_process = list(get_date_range(actual_start_date, END_DATE))
