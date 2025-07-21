@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-START_DATE = datetime(2013, 1, 1)
+START_DATE = datetime(2013, 11, 1)
 END_DATE = datetime(2014, 1, 1)
 PUBLISHER_NAME = "am730"
 TEMP_DIR = "temp_downloads"
