@@ -16,9 +16,8 @@ from typing import Union
 import fitz
 
 # Import Azure storage utility
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'controllers'))
-from azure_storage import create_azure_storage_client
-
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from controllers.azure_storage import create_azure_storage_client
 
 # Setup logging
 logging.basicConfig(
