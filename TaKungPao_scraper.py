@@ -1,9 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
-
-
 import os
 import sys
 import logging
@@ -15,8 +12,10 @@ from bs4 import BeautifulSoup
 from typing import Union
 import fitz
 
-# Import Azure storage utility
-#sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Import Azure storage utility (this file remains untouched)
+# Ensure your sys.path is correctly configured if 'controllers' is not in the same directory or Python path
+# For example, if 'controllers' is a sibling directory to the one containing this script:
+# sys.path.append(str(Path(__file__).parent.parent)) 
 from controllers.azure_storage import create_azure_storage_client, AzureBlobStorage
 
 # Setup logging
@@ -32,11 +31,11 @@ logger = logging.getLogger(__name__)
 
 # Constants
 BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
-START_DATE = datetime(2018, 6, 8) # Your original start date
-END_DATE = datetime(2025, 7, 25) # Dynamically set end date to current date
+START_DATE = datetime(2018, 6, 8) 
+END_DATE = datetime.now() # Dynamically set end date to current date and time of execution
 PUBLISHER_NAME = "TaKungPao"
 TEMP_DIR = "temp_downloads"
-CHECKPOINT_FILE = "takungpao_checkpoint.txt" # New checkpoint file
+CHECKPOINT_FILE = "takungpao_checkpoint.txt"
 
 # Create necessary temporary directory
 Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
@@ -57,15 +56,13 @@ def get_download_urls(date_str: str) -> list[str]:
 
     download_urls = []
     try:
-        # Send a GET request to the URL
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
+        response.raise_for_status() # This will raise HTTPError for 4xx/5xx responses
 
         soup = BeautifulSoup(response.text, 'html.parser')
-
         img_tags = soup.find_all('img', downloadurl=True)
 
         for img_tag in img_tags:
@@ -74,7 +71,8 @@ def get_download_urls(date_str: str) -> list[str]:
                 download_urls.append(download_url)
 
     except requests.exceptions.RequestException as e:
-        if response.status_code == 404:
+        # Check for 404 specifically to treat as a non-fatal "holiday" scenario
+        if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 404:
             logger.warning(f"Page not found (404) for {date_str}. This might be a holiday. Skipping.")
         else:
             logger.error(f"Error fetching the page {url}: {e}")
@@ -91,8 +89,8 @@ def download_pdf(pdf_url: str, date_str: str, page_index: int) -> Union[Path, No
     Returns:
         The Path object to the downloaded PDF file, or None if download fails.
     """
-    
-    temp_pdf_path = Path(TEMP_DIR) / f"{date_str}_page_{page_index}.pdf"
+    # Renamed temp PDF filename to distinguish from potential output JPG page numbers
+    temp_pdf_path = Path(TEMP_DIR) / f"{date_str}_pdf_part_{page_index}.pdf" 
     logger.info(f"Downloading PDF from: {pdf_url} to {temp_pdf_path}")
     try:
         response = requests.get(pdf_url, stream=True, timeout=30)
@@ -107,70 +105,81 @@ def download_pdf(pdf_url: str, date_str: str, page_index: int) -> Union[Path, No
     except requests.exceptions.RequestException as e:
         logger.error(f"Error downloading PDF from {pdf_url}: {e}")
         return None
-    
     except Exception as e:
         logger.error(f"An unexpected error occurred during PDF download: {e}")
         return None
 
 
-def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date: datetime, page_number_offset: int = 0) -> list[str]:
+def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date: datetime, actual_start_page_num: int) -> list[str]:
+    """
+    Converts a PDF file's pages to JPG images and uploads them to Azure Blob Storage.
+    The actual_start_page_num ensures correct sequential numbering.
+
+    Args:
+        pdf_path: Path to the downloaded PDF file.
+        azure_client: The initialized AzureBlobStorage client.
+        date: The date for which the PDF is being processed.
+        actual_start_page_num: The 1-based overall page number that the first page of *this* PDF corresponds to.
+
+    Returns:
+        A list of URLs of the successfully uploaded JPG images.
+    """
     uploaded_urls = []
     try:
         with fitz.open(pdf_path) as doc:
             logger.info(f"Opened PDF {pdf_path.name} with {doc.page_count} pages.")
-            for i in range(doc.page_count):
-                # Construct temp JPG path for each page
-                temp_jpg_name = f"{pdf_path.stem}_page_{i+1}.jpeg" # e.g., 20180608_page_4_page_1.jpeg
+            if doc.page_count == 0:
+                logger.warning(f"PDF {pdf_path.name} contains no pages. Skipping conversion and upload.")
+                return uploaded_urls # Return empty list if PDF has no pages
+
+            for i in range(doc.page_count): # i is internal_page_index within this PDF (0, 1, 2...)
+                temp_jpg_name = f"{pdf_path.stem}_page_{i+1}.jpeg"
                 temp_jpg_path = Path(TEMP_DIR) / temp_jpg_name
 
                 try:
                     page = doc.load_page(i)
-                    zoom = 2.0 # You can adjust this for quality vs file size
+                    zoom = 2.0
                     mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(matrix=mat)
 
-                    # This is the working conversion method from am730_scraper.py
                     pix.save(temp_jpg_path, "jpeg")
-                    logger.info(f"Successfully converted page {i+1} to JPG: {temp_jpg_path.name}")
+                    logger.info(f"Successfully converted page {i+1} of {pdf_path.name} to JPG: {temp_jpg_path.name}")
 
-                    # Read the JPG bytes from the temporary file
                     with open(temp_jpg_path, 'rb') as f:
                         image_data = f.read()
 
-                    # Construct the 1-based page number for the output file name
-                    page_num_for_upload = i + 1 + page_number_offset
-                    file_extension = "jpg" # Output format is JPG
+                    # Calculate the overall 1-based page number for upload
+                    page_num_for_upload = actual_start_page_num + i 
+                    file_extension = "jpg"
 
-                    # Upload to Azure using the utility function
                     uploaded_url = azure_client.upload_image(
                         publisher_name=PUBLISHER_NAME,
                         date=date,
                         page_num=page_num_for_upload,
-                        image_data=image_data, # Now passing actual bytes from the temp file
+                        image_data=image_data,
                         file_extension=file_extension
                     )
                     if uploaded_url:
                         uploaded_urls.append(uploaded_url)
-                        logger.info(f"Uploaded page {i+1} to Azure: {uploaded_url}")
+                        logger.info(f"Uploaded page {page_num_for_upload} to Azure: {uploaded_url}")
                     else:
-                        logger.error(f"Failed to upload page {i+1} to Azure.")
-
+                        logger.error(f"Failed to upload page {page_num_for_upload} to Azure.")
+                        # Even if one page fails to upload, we continue within this PDF,
+                        # but the smaller len(uploaded_urls) will be caught by scrape_date.
+                        
                 except Exception as convert_e:
-                    logger.error(f"Failed to convert or upload page {i+1} of {pdf_path.name}: {convert_e}")
-                    # Continue to next page if one fails
-                    continue
+                    logger.error(f"Failed to convert or upload page {actual_start_page_num + i} of {pdf_path.name}: {convert_e}")
+                    continue # Continue to next page in this PDF
                 finally:
-                    # Clean up temporary JPG file for the page
                     if temp_jpg_path.exists():
                         os.remove(temp_jpg_path)
                         logger.info(f"Cleaned up temporary JPG: {temp_jpg_path.name}")
 
-        logger.info(f"Finished processing pages from {pdf_path.name}.")
+        logger.info(f"Finished processing pages from {pdf_path.name}. Uploaded {len(uploaded_urls)} pages.")
 
     except Exception as e:
         logger.error(f"Error processing PDF {pdf_path.name}: {e}")
     finally:
-        # Clean up the original downloaded PDF
         if pdf_path.exists():
             os.remove(pdf_path)
             logger.info(f"Cleaned up temporary PDF: {pdf_path.name}")
@@ -205,6 +214,7 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
     """
     Scrapes the Ta Kung Pao e-paper for a specific date, downloads PDFs,
     converts them to JPGs, and uploads them to Azure Blob Storage.
+    Stops immediately and returns False if any non-holiday related error occurs.
 
     Args:
         date: The datetime object for the date to scrape.
@@ -218,49 +228,42 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
     pdf_urls = get_download_urls(date_str)
 
     if not pdf_urls:
-        logger.info(f"No PDF URLs found for {date_str}. Skipping this date.")
-        # If no URLs, it's considered successfully "processed" for this date (e.g., holiday)
-        return True 
+        logger.info(f"No PDF URLs found for {date_str}. This might be a holiday or page not existing. Skipping this date.")
+        return True # Considered successful if no PDFs (e.g., holiday)
 
     logger.info(f"Found {len(pdf_urls)} PDF URLs for {date_str}.")
     
-    current_output_page_num = 1 # Initialize page number for the output filename
-    all_pages_uploaded_for_date = True
-
     for i, pdf_url in enumerate(pdf_urls):
         logger.info(f"Processing PDF {i+1}/{len(pdf_urls)} for {date_str}: {pdf_url}")
         
         temp_pdf_path = download_pdf(pdf_url, date_str, i)
         if temp_pdf_path:
-            # Convert PDF to JPGs and upload to Azure
-            uploaded_urls = convert_pdf_and_upload(temp_pdf_path, azure_client, date, page_number_offset=current_output_page_num - 1)
+            # Pass the 1-based index (i+1) as the actual starting page number for this PDF
+            uploaded_urls = convert_pdf_and_upload(temp_pdf_path, azure_client, date, actual_start_page_num=i + 1)
             
             if uploaded_urls:
-                current_output_page_num += len(uploaded_urls)
                 logger.info(f"Successfully processed and uploaded {len(uploaded_urls)} pages from {pdf_url}.")
             else:
-                logger.warning(f"No images converted or uploaded from PDF: {pdf_url}")
-                all_pages_uploaded_for_date = False # Mark as failure for this date
+                logger.error(f"Failed to convert or upload any images from PDF: {pdf_url}. This indicates a content or conversion issue. Stopping processing for this date.")
+                return False # Immediate stop if conversion/upload yields no results from a downloaded PDF
         else:
-            logger.warning(f"Failed to download PDF from {pdf_url}. Skipping conversion and upload.")
-            all_pages_uploaded_for_date = False # Mark as failure for this date
+            logger.error(f"Failed to download PDF from {pdf_url}. This indicates a network or server issue. Stopping processing for this date.")
+            return False # Immediate stop if download fails for any PDF
 
-        # Polite scraping: Wait a bit after each PDF download/conversion/upload
-        time.sleep(0.1)
+        time.sleep(0.1) # Polite scraping: Wait a bit after each PDF download/conversion/upload
     
-    return all_pages_uploaded_for_date
+    logger.info(f"All PDFs for {date_str} processed successfully.")
+    return True # All PDFs for this date were successfully processed
 
 
 def main():
     logger.info("=== Starting Ta Kung Pao E-Paper Scraper ===")
 
-    # Initialize Azure Blob Storage client
     azure_client = create_azure_storage_client()
     if not azure_client:
-        logger.error("Failed to initialize Azure Blob Storage client. Exiting.")
-        return
+        logger.critical("Failed to initialize Azure Blob Storage client. Cannot proceed. Exiting.")
+        sys.exit(1) # Exit with an error code, indicating a critical setup failure
 
-    # Load checkpoint or start from START_DATE
     start_from_date = load_checkpoint()
     if start_from_date:
         logger.info(f"Resuming from checkpoint: {start_from_date.strftime('%Y-%m-%d')}")
@@ -268,44 +271,31 @@ def main():
         start_from_date = START_DATE
         logger.info(f"Starting from beginning: {start_from_date.strftime('%Y-%m-%d')}")
 
+    total_dates_to_scrape = (END_DATE - start_from_date).days + 1
+    logger.info(f"Will attempt to scrape {total_dates_to_scrape} dates from {start_from_date.strftime('%Y-%m-%d')} to {END_DATE.strftime('%Y-%m-%d')}.")
+
     current_date = start_from_date
     processed_count = 0
     while current_date <= END_DATE:
         try:
             success = scrape_date(current_date, azure_client)
             if success:
-                save_checkpoint(current_date) # Save checkpoint only on successful completion of a date
+                save_checkpoint(current_date)
             else:
-                # If a date fails, we stop and let the next run pick up from the last successful checkpoint.
-                # Or, you could decide to attempt the failed date again on the next run.
-                # For now, we'll stop to ensure we don't skip dates.
-                logger.error(f"Processing failed for {current_date.strftime('%Y-%m-%d')}. Stopping.")
-                break 
+                logger.critical(f"Critical error encountered while processing {current_date.strftime('%Y-%m-%d')}. Stopping program.")
+                sys.exit(1) # Hard stop the program on critical failure for a date
 
             processed_count += 1
-            # Polite scraping: Wait longer between different dates, especially if many are processed
-            # Adjust sleep time based on typical run duration and rate limits
-            if processed_count % 10 == 0: # Save checkpoint more frequently, e.g., every 10 dates
+            if processed_count % 10 == 0: # Checkpoint and longer break every 10 processed dates
                 logger.info(f"Processed {processed_count} dates. Taking a longer break.")
-                time.sleep(5) # Longer break after a batch of dates
+                time.sleep(5)
             else:
                 time.sleep(1) # Shorter break between individual dates
 
         except Exception as e:
-            logger.error(f"An unexpected error occurred during scraping for {current_date.strftime('%Y-%m-%d')}: {e}")
-            # If an error occurs, save the last successfully processed date (or the date *before* the error)
-            # and break to prevent continuous failure.
-            # The checkpoint will ensure it tries from the next day on the next run.
-            break # Exit the loop on error to prevent cascading issues
+            logger.critical(f"An unexpected critical error occurred during scraping for {current_date.strftime('%Y-%m-%d')}: {e}. Stopping program.")
+            sys.exit(1) # Hard stop on any unhandled exception during the main loop
 
         current_date += timedelta(days=1)
 
-    logger.info(f"Scraping completed for dates from {start_from_date.strftime('%Y-%m-%d')} to {current_date.strftime('%Y-%m-%d')}.")
-    logger.info(f"All downloaded images were uploaded to Azure Blob Storage in container '{os.environ.get('AZURE_CONTAINER_NAME', 'epaper-images')}'.")
-    logger.info(f"Temporary PDF files were stored in '{TEMP_DIR}' and should have been cleaned up.")
-    logger.info("=== Ta Kung Pao E-Paper Scraper Finished ===")
-
-
-if __name__ == "__main__":
-    main()
-
+    logger.info(f"Scraping completed for dates from {start_from_date.strftime('%Y-%m-%d')} to {current_date.strftime
