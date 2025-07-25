@@ -30,19 +30,20 @@ logger = logging.getLogger(__name__)
 
 # Constants
 BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
-START_DATE = datetime(2018, 6, 10) 
+START_DATE = datetime(2018, 6, 8)
 END_DATE = datetime(2025, 7, 25) 
 PUBLISHER_NAME = "TaKungPao"
-TEMP_DIR = "temp_downloads"
+TEMP_PDF_DIR = "temp_downloads" # Renamed for clarity as it's for PDFs
 CHECKPOINT_FILE = "takungpao_checkpoint.txt"
 
 # Create necessary temporary directory
-Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
+Path(TEMP_PDF_DIR).mkdir(parents=True, exist_ok=True)
 
 
 def get_download_urls(date_str: str) -> list[str]:
     """
-    Fetches the webpage for a given date and extracts all 'downloadurl' attributes from <img> tags.
+    Fetches the webpage for a given date from takungpao.com.hk and extracts
+    all 'downloadurl' attributes from <img> tags.
     """
     url = BASE_URL_FORMAT.format(date_str=date_str)
     logger.info(f"Attempting to fetch URL: {url}")
@@ -94,8 +95,6 @@ def get_pdf_page_count_from_url(pdf_url: str) -> Union[int, None]:
             logger.warning(f"URL {pdf_url} does not seem to be a valid PDF (missing %PDF header).")
             return None
 
-        # PyMuPDF can sometimes get page count from partial data if header info is present
-        # but it's not guaranteed without full download. This is a best-effort pre-check.
         with fitz.open(stream=initial_bytes, filetype="pdf") as doc:
             if doc.page_count > 0:
                 return doc.page_count
@@ -139,11 +138,15 @@ def download_pdf(pdf_url: str, temp_pdf_path: Path) -> Union[Path, None]:
 
 def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date: datetime, page_number_offset: int = 0) -> bool:
     """
-    Converts pages of a PDF to JPGs, uploads them to Azure, and cleans up temporary files.
+    Converts pages of a PDF to JPGs, uploads them to Azure, and handles cleanup.
     Only uploads if the blob does not already exist.
     Returns True if all pages were either uploaded or already existed, False if any error occurred.
     """
     all_pages_processed_ok = True
+    if not pdf_path or not pdf_path.exists():
+        logger.error(f"PDF file not found for conversion: {pdf_path}")
+        return False
+
     try:
         with fitz.open(pdf_path) as doc:
             logger.info(f"Opened PDF {pdf_path.name} with {doc.page_count} pages.")
@@ -156,14 +159,17 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
                     logger.info(f"Page {page_num_for_upload} for {date.strftime('%Y-%m-%d')} already exists in Azure. Skipping upload.")
                     continue # Skip to next page if it exists
 
+                # If blob doesn't exist, proceed with conversion and upload
                 temp_jpg_name = f"{pdf_path.stem}_page_{i+1}.jpeg"
-                temp_jpg_path = Path(TEMP_DIR) / temp_jpg_name
+                temp_jpg_path = Path(TEMP_PDF_DIR) / temp_jpg_name # Use TEMP_PDF_DIR for all temps
 
                 try:
                     page = doc.load_page(i)
                     zoom = 2.0
                     mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(matrix=mat)
+                    
+                    # Save to temp file for upload, or use in-memory bytes if your azure client supports it better
                     pix.save(temp_jpg_path, "jpeg")
                     logger.info(f"Successfully converted page {i+1} to JPG: {temp_jpg_path.name}")
 
@@ -181,11 +187,10 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
                         logger.info(f"Uploaded page {page_num_for_upload} to Azure: {uploaded_url}")
                     else:
                         logger.error(f"Failed to upload page {page_num_for_upload} to Azure.")
-                        all_pages_processed_ok = False
-
+                        all_pages_processed_ok = False # Mark overall status as failed
                 except Exception as convert_e:
                     logger.error(f"Failed to convert or upload page {i+1} of {pdf_path.name}: {convert_e}")
-                    all_pages_processed_ok = False
+                    all_pages_processed_ok = False # Mark overall status as failed
                     continue # Try next page in PDF if one fails
                 finally:
                     if temp_jpg_path.exists():
@@ -198,7 +203,7 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
         logger.error(f"Error opening or processing PDF {pdf_path.name}: {e}")
         all_pages_processed_ok = False
     
-    # PDF cleanup is now handled in scrape_date AFTER page count is determined
+    # PDF cleanup is now handled in scrape_date AFTER page count is determined for offset
     return all_pages_processed_ok
 
 
@@ -245,40 +250,48 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
     all_pdfs_for_date_processed_successfully = True
 
     for i, pdf_url in enumerate(pdf_urls):
+        logger.info(f"Evaluating PDF {i+1}/{len(pdf_urls)} for {date_str}: {pdf_url}")
+
         pdf_page_count = get_pdf_page_count_from_url(pdf_url)
         
-        # Determine if we can skip the PDF download entirely
+        # --- NEW & IMPROVED PAGE CHECKING LOGIC ---
         can_skip_download = False
         if pdf_page_count is not None and pdf_page_count > 0:
+            # Check if ALL expected output JPGs for this PDF are already in Azure
             all_expected_pages_exist = True
             for page_idx_in_pdf in range(pdf_page_count):
                 expected_azure_page_num = current_output_page_num + page_idx_in_pdf
                 if not azure_client.blob_exists(PUBLISHER_NAME, date, expected_azure_page_num, "jpg"):
                     all_expected_pages_exist = False
-                    break # Found a missing page, cannot skip download
+                    break # Found a missing page, so we cannot skip the download for this PDF
             
             if all_expected_pages_exist:
-                logger.info(f"All {pdf_page_count} pages for PDF {i+1} ({pdf_url}) for {date_str} already exist in Azure. Skipping download and processing.")
-                current_output_page_num += pdf_page_count # Advance page number correctly
+                logger.info(f"All {pdf_page_count} pages from PDF {i+1} ({pdf_url}) for {date_str} already exist in Azure. Skipping download and processing.")
+                current_output_page_num += pdf_page_count # IMPORTANT: Advance page number correctly even if skipped
                 can_skip_download = True
+        else:
+            # If we can't get a reliable page count, we can't reliably pre-check.
+            # We must proceed with download and rely on page-level checks within convert_pdf_and_upload.
+            logger.warning(f"Could not reliably determine page count for PDF {i+1} ({pdf_url}). Will attempt download and processing regardless.")
+
 
         if can_skip_download:
-            continue # Skip to the next PDF URL
+            time.sleep(0.1) # Small delay even on skip for politeness
+            continue # Skip to the next PDF URL in the list
 
-        # If we reach here, we need to download and process the PDF (either because it's new,
-        # or we couldn't reliably determine its page count to pre-check existence).
-        temp_pdf_path = Path(TEMP_DIR) / f"{date_str}_pdf_{i}.pdf"
+
+        # If we reach here, we need to download and process the PDF
+        temp_pdf_path = Path(TEMP_PDF_DIR) / f"{date_str}_pdf_{i}.pdf"
         downloaded_pdf_path = download_pdf(pdf_url, temp_pdf_path)
 
         if downloaded_pdf_path:
             pages_processed_ok_for_this_pdf = convert_pdf_and_upload(downloaded_pdf_path, azure_client, date, page_number_offset=current_output_page_num - 1)
             
-            # After processing (or attempting to process), get actual page count and advance.
+            # After processing (or attempting to process), get actual page count from the downloaded file and advance.
+            actual_pages_in_pdf = 0
             try:
                 with fitz.open(downloaded_pdf_path) as doc_actual_pages:
                     actual_pages_in_pdf = doc_actual_pages.page_count
-                    current_output_page_num += actual_pages_in_pdf
-                    logger.info(f"Advanced output page number by {actual_pages_in_pdf} pages. Next PDF will start at Azure page {current_output_page_num}.")
             except Exception as e:
                 logger.error(f"Could not determine actual page count for downloaded PDF {downloaded_pdf_path}: {e}. This may affect subsequent page numbering.")
                 all_pdfs_for_date_processed_successfully = False # Consider this a failure for the date if page count tracking breaks
@@ -286,6 +299,11 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
                 if downloaded_pdf_path.exists():
                     os.remove(downloaded_pdf_path)
                     logger.info(f"Cleaned up temporary PDF: {downloaded_pdf_path.name}")
+            
+            # Advance current_output_page_num based on the actual pages found in the PDF
+            current_output_page_num += actual_pages_in_pdf
+            logger.info(f"Advanced output page number by {actual_pages_in_pdf} pages. Next PDF will start at Azure page {current_output_page_num}.")
+
 
             if not pages_processed_ok_for_this_pdf:
                 all_pdfs_for_date_processed_successfully = False # A page failed to convert/upload for this PDF
