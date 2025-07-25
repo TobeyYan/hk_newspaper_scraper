@@ -8,8 +8,8 @@ import requests
 import fitz # PyMuPDF library for PDF conversion
 
 # Import Azure storage utility from a parent directory
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from controllers.azure_storage import create_azure_storage_client
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from controllers.azure_storage import create_azure_storage_client, AzureBlobStorage
 
 # Setup logging
 logging.basicConfig(
