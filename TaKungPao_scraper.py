@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Constants
 BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
 START_DATE = datetime(2018, 6, 10)
-END_DATE = (2025, 7, 25)
+END_DATE = datetime(2025, 7, 25) 
 PUBLISHER_NAME = "TaKungPao"
 TEMP_DIR = "temp_downloads"
 CHECKPOINT_FILE = "takungpao_checkpoint.txt"
@@ -332,4 +332,34 @@ def main():
     total_dates_to_scrape = (effective_end_date - start_from_date).days + 1
     logger.info(f"Will attempt to scrape {total_dates_to_scrape} dates from {start_from_date.strftime('%Y-%m-%d')} to {effective_end_date.strftime('%Y-%m-%d')}.")
 
-    current_date = start
+    current_date = start_from_date
+    processed_count = 0
+    while current_date <= effective_end_date:
+        try:
+            success = scrape_date(current_date, azure_client)
+            if success:
+                save_checkpoint(current_date) # Save checkpoint only on full success of the date
+            else:
+                logger.error(f"Processing failed for {current_date.strftime('%Y-%m-%d')}. Stopping to address the issue.")
+                break
+
+            processed_count += 1
+            if processed_count % 10 == 0:
+                logger.info(f"Processed {processed_count} dates. Taking a longer break.")
+                time.sleep(5)
+            else:
+                time.sleep(1)
+
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during scraping for {current_date.strftime('%Y-%m-%d')}: {e}")
+            break
+
+        current_date += timedelta(days=1)
+
+    final_processed_date = current_date - timedelta(days=1) if current_date > start_from_date else start_from_date # Adjust if loop broke immediately
+    logger.info(f"Scraping session finished. Last attempted date: {final_processed_date.strftime('%Y-%m-%d')}.")
+    logger.info("=== Ta Kung Pao E-Paper Scraper Finished ===")
+
+
+if __name__ == "__main__":
+    main()
