@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
-START_DATE = datetime(2018, 6, 10)
+START_DATE = datetime(2018, 6, 10) 
 END_DATE = datetime(2025, 7, 25) 
 PUBLISHER_NAME = "TaKungPao"
 TEMP_DIR = "temp_downloads"
@@ -83,29 +83,25 @@ def get_pdf_page_count_from_url(pdf_url: str) -> Union[int, None]:
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Range': 'bytes=0-4096' # Request first 4KB, usually enough for PDF header
+            'Range': 'bytes=0-4096' # Request first 4KB, usually enough for PDF header to try to parse
         }
         response = requests.get(pdf_url, headers=headers, stream=True, timeout=10)
         response.raise_for_status()
 
-        # Read only a portion of the content
         initial_bytes = response.raw.read(4096)
         
-        # Check if PDF content is present
         if not initial_bytes.startswith(b'%PDF'):
             logger.warning(f"URL {pdf_url} does not seem to be a valid PDF (missing %PDF header).")
             return None
 
-        # Try to open the partial PDF with fitz
+        # PyMuPDF can sometimes get page count from partial data if header info is present
+        # but it's not guaranteed without full download. This is a best-effort pre-check.
         with fitz.open(stream=initial_bytes, filetype="pdf") as doc:
-            # FitZ might not correctly determine page count from partial download.
-            # A full download is often required for accurate page count with PyMuPDF.
-            # However, sometimes doc.page_count can be accurate enough from header.
             if doc.page_count > 0:
                 return doc.page_count
             else:
                 logger.warning(f"Could not reliably determine page count from partial download for {pdf_url}.")
-                return None # Fallback if partial read isn't enough
+                return None
 
     except requests.exceptions.RequestException as e:
         logger.warning(f"Failed to get partial PDF for page count from {pdf_url}: {e}")
@@ -153,12 +149,10 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
             logger.info(f"Opened PDF {pdf_path.name} with {doc.page_count} pages.")
             for i in range(doc.page_count):
                 page_num_for_upload = i + 1 + page_number_offset
-                file_extension = "jpg"
+                file_extension = "jpg" # Output format for Azure
 
                 # Check if this specific page (JPG blob) already exists in Azure
-                if azure_client.blob_client_exists(
-                    azure_client._get_blob_name(PUBLISHER_NAME, date, page_num_for_upload, file_extension)
-                ):
+                if azure_client.blob_exists(PUBLISHER_NAME, date, page_num_for_upload, file_extension):
                     logger.info(f"Page {page_num_for_upload} for {date.strftime('%Y-%m-%d')} already exists in Azure. Skipping upload.")
                     continue # Skip to next page if it exists
 
@@ -192,21 +186,19 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
                 except Exception as convert_e:
                     logger.error(f"Failed to convert or upload page {i+1} of {pdf_path.name}: {convert_e}")
                     all_pages_processed_ok = False
-                    continue
+                    continue # Try next page in PDF if one fails
                 finally:
                     if temp_jpg_path.exists():
                         os.remove(temp_jpg_path)
                         logger.info(f"Cleaned up temporary JPG: {temp_jpg_path.name}")
 
-        logger.info(f"Finished processing pages from {pdf_path.name}.")
+        logger.info(f"Finished attempting to process pages from {pdf_path.name}.")
 
     except Exception as e:
-        logger.error(f"Error processing PDF {pdf_path.name}: {e}")
+        logger.error(f"Error opening or processing PDF {pdf_path.name}: {e}")
         all_pages_processed_ok = False
-    finally:
-        if pdf_path.exists():
-            os.remove(pdf_path)
-            logger.info(f"Cleaned up temporary PDF: {pdf_path.name}")
+    
+    # PDF cleanup is now handled in scrape_date AFTER page count is determined
     return all_pages_processed_ok
 
 
@@ -250,62 +242,61 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
     logger.info(f"Found {len(pdf_urls)} PDF URLs for {date_str}.")
 
     current_output_page_num = 1  # Tracks the 1-based output page number across all PDFs for this date
-    all_pdfs_processed_successfully = True
+    all_pdfs_for_date_processed_successfully = True
 
     for i, pdf_url in enumerate(pdf_urls):
         pdf_page_count = get_pdf_page_count_from_url(pdf_url)
-
-        if pdf_page_count is None:
-            logger.warning(f"Could not determine page count for PDF {i+1} ({pdf_url}). Will attempt download and processing regardless.")
-            # If page count cannot be determined, we cannot reliably skip ahead.
-            # Proceed with download and rely on convert_pdf_and_upload for page-level existence checks.
-            pass # No skip here
-
-        else:
-            # Check if all expected output pages for this specific PDF already exist in Azure.
-            # This allows skipping the download entirely if the PDF is already processed.
-            all_pages_exist_for_this_pdf = True
+        
+        # Determine if we can skip the PDF download entirely
+        can_skip_download = False
+        if pdf_page_count is not None and pdf_page_count > 0:
+            all_expected_pages_exist = True
             for page_idx_in_pdf in range(pdf_page_count):
                 expected_azure_page_num = current_output_page_num + page_idx_in_pdf
-                if not azure_client.blob_client_exists(
-                    azure_client._get_blob_name(PUBLISHER_NAME, date, expected_azure_page_num, "jpg")
-                ):
-                    all_pages_exist_for_this_pdf = False
-                    break # At least one page is missing, so we need to download and process
-
-            if all_pages_exist_for_this_pdf:
-                logger.info(f"All {pdf_page_count} pages from PDF {i+1} ({pdf_url}) for {date_str} already exist in Azure. Skipping download and processing.")
+                if not azure_client.blob_exists(PUBLISHER_NAME, date, expected_azure_page_num, "jpg"):
+                    all_expected_pages_exist = False
+                    break # Found a missing page, cannot skip download
+            
+            if all_expected_pages_exist:
+                logger.info(f"All {pdf_page_count} pages for PDF {i+1} ({pdf_url}) for {date_str} already exist in Azure. Skipping download and processing.")
                 current_output_page_num += pdf_page_count # Advance page number correctly
-                continue # Skip to next PDF URL
+                can_skip_download = True
 
+        if can_skip_download:
+            continue # Skip to the next PDF URL
 
-        # Proceed to download if not skipped
+        # If we reach here, we need to download and process the PDF (either because it's new,
+        # or we couldn't reliably determine its page count to pre-check existence).
         temp_pdf_path = Path(TEMP_DIR) / f"{date_str}_pdf_{i}.pdf"
         downloaded_pdf_path = download_pdf(pdf_url, temp_pdf_path)
 
         if downloaded_pdf_path:
-            # Now convert and upload, with page-level existence check inside
-            pages_processed_ok = convert_pdf_and_upload(downloaded_pdf_path, azure_client, date, page_number_offset=current_output_page_num - 1)
+            pages_processed_ok_for_this_pdf = convert_pdf_and_upload(downloaded_pdf_path, azure_client, date, page_number_offset=current_output_page_num - 1)
             
-            # After successful processing (or partial processing where some pages were new),
-            # accurately update current_output_page_num using the actual PDF's page count.
+            # After processing (or attempting to process), get actual page count and advance.
             try:
                 with fitz.open(downloaded_pdf_path) as doc_actual_pages:
-                    current_output_page_num += doc_actual_pages.page_count
+                    actual_pages_in_pdf = doc_actual_pages.page_count
+                    current_output_page_num += actual_pages_in_pdf
+                    logger.info(f"Advanced output page number by {actual_pages_in_pdf} pages. Next PDF will start at Azure page {current_output_page_num}.")
             except Exception as e:
                 logger.error(f"Could not determine actual page count for downloaded PDF {downloaded_pdf_path}: {e}. This may affect subsequent page numbering.")
-                all_pdfs_processed_successfully = False # Consider this a failure for the date if page count tracking breaks
+                all_pdfs_for_date_processed_successfully = False # Consider this a failure for the date if page count tracking breaks
+            finally: # PDF cleanup happens here, AFTER its page count has been used
+                if downloaded_pdf_path.exists():
+                    os.remove(downloaded_pdf_path)
+                    logger.info(f"Cleaned up temporary PDF: {downloaded_pdf_path.name}")
 
-            if not pages_processed_ok:
-                all_pdfs_processed_successfully = False # A page failed to convert/upload for this PDF
+            if not pages_processed_ok_for_this_pdf:
+                all_pdfs_for_date_processed_successfully = False # A page failed to convert/upload for this PDF
 
         else:
             logger.warning(f"Failed to download PDF from {pdf_url}. Skipping conversion and upload.")
-            all_pdfs_processed_successfully = False # Mark as failure for this date
+            all_pdfs_for_date_processed_successfully = False # Mark as failure for this date
 
         time.sleep(0.1) # Polite scraping delay between PDFs
 
-    return all_pdfs_processed_successfully
+    return all_pdfs_for_date_processed_successfully
 
 
 def main():
@@ -341,22 +332,22 @@ def main():
                 save_checkpoint(current_date) # Save checkpoint only on full success of the date
             else:
                 logger.error(f"Processing failed for {current_date.strftime('%Y-%m-%d')}. Stopping to address the issue.")
-                break
+                break # Stop the loop on first failure to allow investigation
 
             processed_count += 1
             if processed_count % 10 == 0:
                 logger.info(f"Processed {processed_count} dates. Taking a longer break.")
-                time.sleep(5)
+                time.sleep(5) # Long break after 10 dates
             else:
-                time.sleep(1)
+                time.sleep(1) # Short break between dates
 
         except Exception as e:
             logger.error(f"An unexpected error occurred during scraping for {current_date.strftime('%Y-%m-%d')}: {e}")
-            break
+            break # Stop the loop on unexpected error
 
         current_date += timedelta(days=1)
 
-    final_processed_date = current_date - timedelta(days=1) if current_date > start_from_date else start_from_date # Adjust if loop broke immediately
+    final_processed_date = current_date - timedelta(days=1) if current_date > start_from_date else start_from_date 
     logger.info(f"Scraping session finished. Last attempted date: {final_processed_date.strftime('%Y-%m-%d')}.")
     logger.info("=== Ta Kung Pao E-Paper Scraper Finished ===")
 
