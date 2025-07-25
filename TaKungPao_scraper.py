@@ -298,4 +298,4 @@ def main():
 
         current_date += timedelta(days=1)
 
-    logger.info(f"Scraping completed for dates from {start_from_date.strftime('%Y-%m-%d')} to {current_date.strftime
+    logger.info(f"Scraping completed for dates from {start_from_date.strftime('%Y-%m-%d')} to {current_date.strftime('%Y-%m-%d')}.")
