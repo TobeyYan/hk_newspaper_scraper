@@ -47,7 +47,7 @@ jobs:
       run: |
         # Ensure the 'controllers' directory at the root is on the Python path
         export PYTHONPATH=$PYTHONPATH:$(pwd)
-        python takungpao_scraper.py
+        python TaKungPao_scraper.py
 
     # Save checkpoint file after successful run
     # Use always() to ensure checkpoint is saved even if the job is cancelled or fails
