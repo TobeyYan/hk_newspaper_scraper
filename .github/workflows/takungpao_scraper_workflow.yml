@@ -1,0 +1,72 @@
+name: Run Daily TaKungPao Scraper
+
+on:
+  workflow_dispatch: # Allows manual triggering
+  schedule:
+    # Runs every 5 hours, every day.
+    # If a run hits timeout, the next scheduled run will pick up.
+    - cron: '0 */5 * * *' 
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  scrape_and_upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 295 # Set a timeout just under 5 hours (300 minutes).
+                         # GitHub's default is 360 minutes (6 hours).
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Fetch history for checkpoint file if it's committed
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9' # Use the same Python version you developed with
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements_takungpao.txt
+
+    # Restore checkpoint file if it exists from previous runs
+    - name: Restore Checkpoint
+      uses: actions/cache@v4
+      with:
+        path: takungpao_checkpoint.txt
+        key: ${{ runner.os }}-takungpao-checkpoint
+
+    - name: Run TaKungPao Scraper
+      env:
+        BLOB_CONNECTION_STRING: ${{ secrets.BLOB_CONNECTION_STRING }}
+        AZURE_CONTAINER_NAME: epaper-images
+      run: |
+        # Ensure the 'controllers' directory at the root is on the Python path
+        export PYTHONPATH=$PYTHONPATH:$(pwd)
+        python takungpao_scraper.py
+
+    # Save checkpoint file after successful run
+    # Use always() to ensure checkpoint is saved even if the job is cancelled or fails
+    # due to the timeout, provided the 'python takungpao_scraper.py' step successfully
+    # wrote the checkpoint file before being terminated.
+    # However, if the Python script itself is terminated mid-day, it won't have
+    # written the checkpoint for that day. The previous day's checkpoint will be loaded.
+    - name: Save Checkpoint
+      if: always() # Save even if cancelled, as long as the Python script had a chance to write
+      uses: actions/cache/save@v4
+      with:
+        path: takungpao_checkpoint.txt
+        key: ${{ runner.os }}-takungpao-checkpoint
+
+    # Upload logs as an artifact (optional, but good for debugging)
+    - name: Upload Logs
+      if: always() # Uploads even if the job fails or is cancelled
+      uses: actions/upload-artifact@v4
+      with:
+        name: takungpao-scraper-logs
+        path: TaKungPao_scraper.log
+        retention-days: 7
