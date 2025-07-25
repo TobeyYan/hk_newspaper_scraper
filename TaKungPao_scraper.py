@@ -35,11 +35,11 @@ BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
 START_DATE = datetime(2018, 6, 8) # Your original start date
 END_DATE = datetime.now() # Dynamically set end date to current date
 PUBLISHER_NAME = "TaKungPao"
-TEMP_PDF_DIR = "temp_downloads"
+TEMP_DIR = "temp_downloads"
 CHECKPOINT_FILE = "takungpao_checkpoint.txt" # New checkpoint file
 
 # Create necessary temporary directory
-Path(TEMP_PDF_DIR).mkdir(parents=True, exist_ok=True)
+Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
 
 
 def get_download_urls(date_str: str) -> list[str]:
@@ -92,7 +92,7 @@ def download_pdf(pdf_url: str, date_str: str, page_index: int) -> Union[Path, No
         The Path object to the downloaded PDF file, or None if download fails.
     """
     
-    temp_pdf_path = Path(TEMP_PDF_DIR) / f"{date_str}_page_{page_index}.pdf"
+    temp_pdf_path = Path(TEMP_DIR) / f"{date_str}_page_{page_index}.pdf"
     logger.info(f"Downloading PDF from: {pdf_url} to {temp_pdf_path}")
     try:
         response = requests.get(pdf_url, stream=True, timeout=30)
@@ -302,7 +302,7 @@ def main():
 
     logger.info(f"Scraping completed for dates from {start_from_date.strftime('%Y-%m-%d')} to {current_date.strftime('%Y-%m-%d')}.")
     logger.info(f"All downloaded images were uploaded to Azure Blob Storage in container '{os.environ.get('AZURE_CONTAINER_NAME', 'epaper-images')}'.")
-    logger.info(f"Temporary PDF files were stored in '{TEMP_PDF_DIR}' and should have been cleaned up.")
+    logger.info(f"Temporary PDF files were stored in '{TEMP_DIR}' and should have been cleaned up.")
     logger.info("=== Ta Kung Pao E-Paper Scraper Finished ===")
 
 
