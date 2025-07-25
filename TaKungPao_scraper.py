@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Constants
 BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
 START_DATE = datetime(2018, 6, 8) # Your original start date
-END_DATE = datetime.now() # Dynamically set end date to current date
+END_DATE = datetime(2025, 7, 25) # Dynamically set end date to current date
 PUBLISHER_NAME = "TaKungPao"
 TEMP_DIR = "temp_downloads"
 CHECKPOINT_FILE = "takungpao_checkpoint.txt" # New checkpoint file
