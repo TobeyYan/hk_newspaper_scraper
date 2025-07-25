@@ -114,69 +114,67 @@ def download_pdf(pdf_url: str, date_str: str, page_index: int) -> Union[Path, No
 
 
 def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date: datetime, page_number_offset: int = 0) -> list[str]:
-    """
-    Converts a PDF file into multiple JPG images, one for each page,
-    and uploads them to Azure Blob Storage using the provided azure_client.
-
-    Args:
-        pdf_path: The path to the PDF file.
-        azure_client: The initialized AzureBlobStorage client.
-        date: The datetime object for the current date.
-        page_number_offset: An offset to apply to page numbers.
-
-    Returns:
-        A list of URLs of the uploaded JPG images.
-    """
-    uploaded_image_urls = []
-    if not pdf_path or not pdf_path.exists():
-        logger.error(f"PDF file not found for conversion: {pdf_path}")
-        return []
-
+    uploaded_urls = []
     try:
         with fitz.open(pdf_path) as doc:
             logger.info(f"Opened PDF {pdf_path.name} with {doc.page_count} pages.")
-
             for i in range(doc.page_count):
-                page = doc.load_page(i)
-                zoom = 2.0
-                mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat)
+                # Construct temp JPG path for each page
+                temp_jpg_name = f"{pdf_path.stem}_page_{i+1}.jpeg" # e.g., 20180608_page_4_page_1.jpeg
+                temp_jpg_path = Path(TEMP_DIR) / temp_jpg_name
 
-                # Get image data as bytes (PyMuPDF's pil_save for in-memory conversion)
                 try:
-                    img_bytes = pix.pil_save(None, format="jpeg", optimize=True)
-                except Exception as e:
-                    logger.error(f"Failed to convert pixmap to bytes for page {i+1} of {pdf_path.name}: {e}. Ensure Pillow is installed.")
-                    continue
-                
-                # Construct the 1-based page number for the output file name
-                page_num_for_upload = i + 1 + page_number_offset 
-                file_extension = "jpg" # Output format is JPG
+                    page = doc.load_page(i)
+                    zoom = 2.0 # You can adjust this for quality vs file size
+                    mat = fitz.Matrix(zoom, zoom)
+                    pix = page.get_pixmap(matrix=mat)
 
-                # Upload to Azure using the utility function
-                uploaded_url = azure_client.upload_image(
-                    publisher_name=PUBLISHER_NAME,
-                    date=date,
-                    page_num=page_num_for_upload,
-                    image_data=img_bytes,
-                    file_extension=file_extension
-                )
-                
-                if uploaded_url:
-                    uploaded_image_urls.append(uploaded_url)
-                else:
-                    logger.warning(f"Failed to upload image for {PUBLISHER_NAME}/{date.strftime('%Y/%m/%d')}/{page_num_for_upload}.{file_extension}")
-            
-            logger.info(f"Finished processing pages from {pdf_path.name}.")
+                    # This is the working conversion method from am730_scraper.py
+                    pix.save(temp_jpg_path, "jpeg")
+                    logger.info(f"Successfully converted page {i+1} to JPG: {temp_jpg_path.name}")
+
+                    # Read the JPG bytes from the temporary file
+                    with open(temp_jpg_path, 'rb') as f:
+                        image_data = f.read()
+
+                    # Construct the 1-based page number for the output file name
+                    page_num_for_upload = i + 1 + page_number_offset
+                    file_extension = "jpg" # Output format is JPG
+
+                    # Upload to Azure using the utility function
+                    uploaded_url = azure_client.upload_image(
+                        publisher_name=PUBLISHER_NAME,
+                        date=date,
+                        page_num=page_num_for_upload,
+                        image_data=image_data, # Now passing actual bytes from the temp file
+                        file_extension=file_extension
+                    )
+                    if uploaded_url:
+                        uploaded_urls.append(uploaded_url)
+                        logger.info(f"Uploaded page {i+1} to Azure: {uploaded_url}")
+                    else:
+                        logger.error(f"Failed to upload page {i+1} to Azure.")
+
+                except Exception as convert_e:
+                    logger.error(f"Failed to convert or upload page {i+1} of {pdf_path.name}: {convert_e}")
+                    # Continue to next page if one fails
+                    continue
+                finally:
+                    # Clean up temporary JPG file for the page
+                    if temp_jpg_path.exists():
+                        os.remove(temp_jpg_path)
+                        logger.info(f"Cleaned up temporary JPG: {temp_jpg_path.name}")
+
+        logger.info(f"Finished processing pages from {pdf_path.name}.")
 
     except Exception as e:
-        logger.error(f"An unexpected error occurred during PDF conversion or upload for {pdf_path}: {e}")
+        logger.error(f"Error processing PDF {pdf_path.name}: {e}")
     finally:
+        # Clean up the original downloaded PDF
         if pdf_path.exists():
             os.remove(pdf_path)
-            logger.info(f"Cleaned up temporary PDF: {pdf_path}")
-
-    return uploaded_image_urls
+            logger.info(f"Cleaned up temporary PDF: {pdf_path.name}")
+    return uploaded_urls
 
 
 def save_checkpoint(date: datetime):
