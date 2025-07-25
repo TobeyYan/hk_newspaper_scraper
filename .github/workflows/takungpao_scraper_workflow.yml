@@ -43,7 +43,7 @@ jobs:
     - name: Run TaKungPao Scraper
       env:
         BLOB_CONNECTION_STRING: ${{ secrets.BLOB_CONNECTION_STRING }}
-        AZURE_CONTAINER_NAME: epaper-images
+        AZURE_CONTAINER_NAME: epaper
       run: |
         # Ensure the 'controllers' directory at the root is on the Python path
         export PYTHONPATH=$PYTHONPATH:$(pwd)
