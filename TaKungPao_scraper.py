@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 # Constants
 BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
-START_DATE = datetime(2018, 8, 24) # This is your desired start date
-END_DATE = datetime(2018, 12, 31)
+START_DATE = datetime(2018, 10, 17) # This is your desired start date
+END_DATE = datetime(2019, 6, 30)
 PUBLISHER_NAME = "TaKungPao"
 TEMP_PDF_DIR = "temp_downloads"
 CHECKPOINT_FILE = "takungpao_checkpoint.txt"
