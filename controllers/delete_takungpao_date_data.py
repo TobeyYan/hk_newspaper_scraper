@@ -97,7 +97,7 @@ def delete_date_data_independent(target_date: datetime):
 
 if __name__ == "__main__":
     # --- IMPORTANT: Specify the date you want to delete here ---
-    date_to_delete = datetime(2018, 6, 10) 
+    date_to_delete = datetime(2018, 7, 27) 
     # -----------------------------------------------------------
 
     logger.info(f"Running deletion utility script for {PUBLISHER_NAME} on {date_to_delete.strftime('%Y-%m-%d')}")
