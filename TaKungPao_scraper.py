@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 
 # Constants
 BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
-START_DATE = datetime(2018, 7, 3)
-END_DATE = datetime(2018, 12, 31) 
+START_DATE = datetime(2018, 7, 3) # This is your desired start date
+END_DATE = datetime(2018, 12, 31)
 PUBLISHER_NAME = "TaKungPao"
-TEMP_PDF_DIR = "temp_downloads" # Renamed for clarity as it's for PDFs
+TEMP_PDF_DIR = "temp_downloads"
 CHECKPOINT_FILE = "takungpao_checkpoint.txt"
 
 # Create necessary temporary directory
@@ -90,7 +90,7 @@ def get_pdf_page_count_from_url(pdf_url: str) -> Union[int, None]:
         response.raise_for_status()
 
         initial_bytes = response.raw.read(4096)
-        
+
         if not initial_bytes.startswith(b'%PDF'):
             logger.warning(f"URL {pdf_url} does not seem to be a valid PDF (missing %PDF header).")
             return None
@@ -168,7 +168,7 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
                     zoom = 2.0
                     mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(matrix=mat)
-                    
+
                     # Save to temp file for upload, or use in-memory bytes if your azure client supports it better
                     pix.save(temp_jpg_path, "jpeg")
                     logger.info(f"Successfully converted page {i+1} to JPG: {temp_jpg_path.name}")
@@ -202,7 +202,7 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
     except Exception as e:
         logger.error(f"Error opening or processing PDF {pdf_path.name}: {e}")
         all_pages_processed_ok = False
-    
+
     # PDF cleanup is now handled in scrape_date AFTER page count is determined for offset
     return all_pages_processed_ok
 
@@ -253,7 +253,7 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
         logger.info(f"Evaluating PDF {i+1}/{len(pdf_urls)} for {date_str}: {pdf_url}")
 
         pdf_page_count = get_pdf_page_count_from_url(pdf_url)
-        
+
         # --- NEW & IMPROVED PAGE CHECKING LOGIC ---
         can_skip_download = False
         if pdf_page_count is not None and pdf_page_count > 0:
@@ -264,7 +264,7 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
                 if not azure_client.blob_exists(PUBLISHER_NAME, date, expected_azure_page_num, "jpg"):
                     all_expected_pages_exist = False
                     break # Found a missing page, so we cannot skip the download for this PDF
-            
+
             if all_expected_pages_exist:
                 logger.info(f"All {pdf_page_count} pages from PDF {i+1} ({pdf_url}) for {date_str} already exist in Azure. Skipping download and processing.")
                 current_output_page_num += pdf_page_count # IMPORTANT: Advance page number correctly even if skipped
@@ -286,7 +286,7 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
 
         if downloaded_pdf_path:
             pages_processed_ok_for_this_pdf = convert_pdf_and_upload(downloaded_pdf_path, azure_client, date, page_number_offset=current_output_page_num - 1)
-            
+
             # After processing (or attempting to process), get actual page count from the downloaded file and advance.
             actual_pages_in_pdf = 0
             try:
@@ -299,7 +299,7 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
                 if downloaded_pdf_path.exists():
                     os.remove(downloaded_pdf_path)
                     logger.info(f"Cleaned up temporary PDF: {downloaded_pdf_path.name}")
-            
+
             # Advance current_output_page_num based on the actual pages found in the PDF
             current_output_page_num += actual_pages_in_pdf
             logger.info(f"Advanced output page number by {actual_pages_in_pdf} pages. Next PDF will start at Azure page {current_output_page_num}.")
@@ -325,12 +325,25 @@ def main():
         logger.error("Failed to initialize Azure Blob Storage client. Exiting.")
         return
 
-    start_from_date = load_checkpoint()
-    if start_from_date:
+    # --- MODIFIED CHECKPOINT LOADING LOGIC ---
+    loaded_checkpoint_date = load_checkpoint()
+
+    # Define the specific problematic checkpoint date we want to ignore.
+    # Since load_checkpoint() returns the *next* date to start from,
+    # if the checkpoint file contained '2018-06-09', load_checkpoint() would return '2018-06-10'.
+    # So, PROBLEM_CHECKPOINT_DATE should be 2018-06-10.
+    PROBLEM_CHECKPOINT_DATE = datetime(2018, 6, 10)
+
+    if loaded_checkpoint_date == PROBLEM_CHECKPOINT_DATE:
+        start_from_date = START_DATE # Use the script's defined START_DATE (2018-07-03 in your case)
+        logger.info(f"Checkpoint date found is {PROBLEM_CHECKPOINT_DATE.strftime('%Y-%m-%d')}, which is problematic. Overriding to start from: {start_from_date.strftime('%Y-%m-%d')}")
+    elif loaded_checkpoint_date:
+        start_from_date = loaded_checkpoint_date
         logger.info(f"Resuming from checkpoint: {start_from_date.strftime('%Y-%m-%d')}")
     else:
         start_from_date = START_DATE
-        logger.info(f"Starting from beginning: {start_from_date.strftime('%Y-%m-%d')}")
+        logger.info(f"No valid checkpoint found or checkpoint is problematic. Starting from beginning: {start_from_date.strftime('%Y-%m-%d')}")
+    # --- END MODIFIED CHECKPOINT LOADING LOGIC ---
 
     # Ensure END_DATE is not before start_from_date, and not in the future.
     effective_end_date = min(END_DATE, datetime.now().replace(hour=0, minute=0, second=0, microsecond=0))
@@ -365,7 +378,7 @@ def main():
 
         current_date += timedelta(days=1)
 
-    final_processed_date = current_date - timedelta(days=1) if current_date > start_from_date else start_from_date 
+    final_processed_date = current_date - timedelta(days=1) if current_date > start_from_date else start_from_date
     logger.info(f"Scraping session finished. Last attempted date: {final_processed_date.strftime('%Y-%m-%d')}.")
     logger.info("=== Ta Kung Pao E-Paper Scraper Finished ===")
 
