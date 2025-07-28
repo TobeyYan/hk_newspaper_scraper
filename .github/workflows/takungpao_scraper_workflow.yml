@@ -5,7 +5,7 @@ on:
   schedule:
     # Runs every 5 hours, every day.
     # If a run hits timeout, the next scheduled run will pick up.
-    - cron: '0 */5 * * *' 
+    - cron: '0 */6 * * *' 
 
 concurrency:
   group: ${{ github.workflow }}
@@ -14,7 +14,7 @@ concurrency:
 jobs:
   scrape_and_upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 295 # Set a timeout just under 5 hours (300 minutes).
+    timeout-minutes: 300 # Set a timeout just under 5 hours (300 minutes).
                          # GitHub's default is 360 minutes (6 hours).
 
     steps:
