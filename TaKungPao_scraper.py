@@ -30,11 +30,10 @@ logger = logging.getLogger(__name__)
 
 # Constants
 BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
-START_DATE = datetime(2019, 4, 26) # This is your desired start date
-END_DATE = datetime(2019, 12, 31)
+START_DATE = datetime(2019, 9, 15) # This is your desired start date
+END_DATE = datetime(2020, 6, 30)
 PUBLISHER_NAME = "TaKungPao"
 TEMP_PDF_DIR = "temp_downloads"
-CHECKPOINT_FILE = "takungpao_checkpoint.txt"
 MISSING_PAGES_LOG = "missing_pages.log" # New file for missing pages
 
 # Create necessary temporary directory
@@ -126,10 +125,11 @@ def get_pdf_page_count_from_url(pdf_url: str) -> Union[int, None]:
 def download_pdf(pdf_url: str, temp_pdf_path: Path) -> Union[Path, None]:
     """
     Downloads a PDF file from the given URL and saves it to a temporary directory.
+    Increased timeout to 60 seconds.
     """
     logger.info(f"Downloading PDF from: {pdf_url} to {temp_pdf_path}")
     try:
-        response = requests.get(pdf_url, stream=True, timeout=30)
+        response = requests.get(pdf_url, stream=True, timeout=60) # Increased timeout
         response.raise_for_status()
 
         with open(temp_pdf_path, 'wb') as f:
@@ -157,7 +157,12 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
     
     if not pdf_path or not pdf_path.exists():
         logger.error(f"PDF file not found for conversion: {pdf_path}")
-        log_missing_page(date, original_pdf_url, starting_azure_page_num, "PDF file not found locally")
+        # Log all expected pages from this PDF as missing if the entire PDF cannot be processed
+        # We need the page count from the URL pre-check, or assume 1 if not available
+        # This part of the logic needs to be careful not to double log.
+        # If the PDF wasn't downloaded, the error is caught earlier in scrape_date.
+        # This branch implies the path was provided but doesn't exist.
+        log_missing_page(date, original_pdf_url, starting_azure_page_num, "PDF file not found locally after download attempt.")
         return 0
 
     try:
@@ -215,18 +220,21 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
 
     except Exception as e:
         logger.error(f"Error opening or processing PDF {pdf_path.name}: {e}")
-        # Log all expected pages from this PDF as missing if the entire PDF cannot be processed
-        # We need the page count from the URL pre-check, or assume 1 if not available
+        # If the entire PDF cannot be opened/processed, log all its expected pages as missing.
+        # We need the actual page count of the PDF that *was* downloaded.
         actual_pages_in_pdf = 0
         try:
             with fitz.open(pdf_path) as doc_actual_pages:
                 actual_pages_in_pdf = doc_actual_pages.page_count
         except Exception:
-            pass # Ignore errors here, we just need a best guess
+            pass # Ignore errors here, we just need a best guess if the file is truly unopenable.
         
-        # If we couldn't get a count, assume at least one page was expected
+        # If we couldn't get a count, assume at least one page was expected for logging purposes.
         if actual_pages_in_pdf == 0:
-            actual_pages_in_pdf = 1 # Assume at least one page to log as missing
+            # This is a fallback. Ideally, the pre-check would have given an estimate.
+            # If a PDF downloads but is completely unreadable, this might be hit.
+            logger.warning(f"Could not get page count from downloaded PDF {pdf_path.name}. Assuming 1 page for logging missing.")
+            actual_pages_in_pdf = 1 
 
         for i in range(actual_pages_in_pdf):
             log_missing_page(date, original_pdf_url, starting_azure_page_num + i, f"Failed to open/process entire PDF. Page {i+1} likely missing.")
@@ -234,29 +242,6 @@ def convert_pdf_and_upload(pdf_path: Path, azure_client: AzureBlobStorage, date:
         return 0 # Indicate 0 pages successfully processed from this PDF
 
     return pages_processed_count
-
-
-def save_checkpoint(date: datetime):
-    """Saves the given date as the last successfully processed date."""
-    try:
-        with open(CHECKPOINT_FILE, 'w') as f:
-            f.write(date.strftime("%Y-%m-%d"))
-        logger.info(f"Checkpoint saved: {date.strftime('%Y-%m-%d')}")
-    except Exception as e:
-        logger.error(f"Failed to save checkpoint: {e}")
-
-def load_checkpoint() -> Union[datetime, None]:
-    """Loads the last successfully processed date and returns the *next* date to start from."""
-    try:
-        if os.path.exists(CHECKPOINT_FILE):
-            with open(CHECKPOINT_FILE, 'r') as f:
-                date_str = f.read().strip()
-            last_processed_date = datetime.strptime(date_str, "%Y-%m-%d")
-            return last_processed_date + timedelta(days=1)
-        return None
-    except Exception as e:
-        logger.error(f"Failed to load checkpoint: {e}")
-        return None
 
 
 def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
@@ -278,21 +263,19 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
 
     # Tracks the 1-based output page number across all PDFs for this date in Azure
     # This is crucial for sequential numbering.
-    current_output_page_num = 1 
+    current_output_page_num = 1    
     
-    # Track overall success for the date, but don't stop the loop.
-    # We still want to save checkpoint if all dates are attempted, even if some pages fail.
-    # The `missing_pages.log` will record the failures.
-    date_has_some_failures = False 
+    # Track overall success for the date. If any page fails (even if others succeed), this becomes False.
+    date_has_any_failures = False 
 
     for i, pdf_url in enumerate(pdf_urls):
         logger.info(f"Evaluating PDF {i+1}/{len(pdf_urls)} for {date_str}: {pdf_url}")
 
-        # Attempt to get page count from URL, helpful for pre-checking and for logging missing pages
         pre_checked_pdf_page_count = get_pdf_page_count_from_url(pdf_url)
 
         # Determine how many pages this PDF is *expected* to contribute to the overall sequence
-        expected_pages_from_this_pdf = pre_checked_pdf_page_count if pre_checked_pdf_page_count is not None else 1 # Assume 1 if uncertain
+        # We use pre_checked_pdf_page_count if available, otherwise default to 1 for calculation.
+        expected_pages_from_this_pdf = pre_checked_pdf_page_count if pre_checked_pdf_page_count is not None else 1
 
         # Check if ALL expected output JPGs for this PDF are already in Azure
         all_expected_pages_exist_in_azure = True
@@ -305,7 +288,7 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
         else:
             # If we can't pre-check page count, we can't reliably say all exist.
             # We must proceed with download and rely on page-level checks within convert_pdf_and_upload.
-            all_expected_pages_exist_in_azure = False 
+            all_expected_pages_exist_in_azure = False    
             logger.warning(f"Could not reliably determine page count for PDF {i+1} ({pdf_url}). Will attempt download and processing regardless.")
 
         if all_expected_pages_exist_in_azure:
@@ -321,9 +304,9 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
         if downloaded_pdf_path:
             # Pass the current_output_page_num to the conversion function
             pages_successfully_processed_from_this_pdf = convert_pdf_and_upload(
-                downloaded_pdf_path, 
-                azure_client, 
-                date, 
+                downloaded_pdf_path,    
+                azure_client,    
+                date,    
                 starting_azure_page_num=current_output_page_num,
                 original_pdf_url=pdf_url
             )
@@ -335,40 +318,39 @@ def scrape_date(date: datetime, azure_client: AzureBlobStorage) -> bool:
                     actual_pages_in_downloaded_pdf = doc_actual_pages.page_count
             except Exception as e:
                 logger.error(f"Could not determine actual page count for downloaded PDF {downloaded_pdf_path}: {e}. This may affect subsequent page numbering.")
-                # If we can't even open the downloaded PDF, assume it had expected_pages_from_this_pdf pages for numbering consistency
-                # and log each of those as missing.
-                actual_pages_in_downloaded_pdf = expected_pages_from_this_pdf
+                # If we can't even open the downloaded PDF, we assume the 'expected' number of pages for numbering consistency
+                # and mark each of those as missing in the log.
                 for page_idx in range(expected_pages_from_this_pdf):
-                     log_missing_page(date, pdf_url, current_output_page_num + page_idx, "Could not open downloaded PDF to get actual page count. Page assumed missing.")
-                date_has_some_failures = True # Mark date as having issues
+                    log_missing_page(date, pdf_url, current_output_page_num + page_idx, "Could not open downloaded PDF to get actual page count. Page assumed missing.")
+                actual_pages_in_downloaded_pdf = expected_pages_from_this_pdf # Use expected for advancing page number
+                date_has_any_failures = True # Mark date as having issues
             finally: # PDF cleanup happens here, AFTER its page count has been used
                 if downloaded_pdf_path.exists():
                     os.remove(downloaded_pdf_path)
                     logger.info(f"Cleaned up temporary PDF: {downloaded_pdf_path.name}")
 
             # Advance current_output_page_num based on the *actual* pages found in the PDF.
-            # If the PDF was corrupt or empty, actual_pages_in_downloaded_pdf will be 0.
+            # If the PDF was corrupt or empty and we couldn't get a page count, actual_pages_in_downloaded_pdf will be 0 or 1.
             current_output_page_num += actual_pages_in_downloaded_pdf
             logger.info(f"Advanced output page number by {actual_pages_in_downloaded_pdf} pages. Next PDF will start at Azure page {current_output_page_num}.")
 
             if pages_successfully_processed_from_this_pdf < actual_pages_in_downloaded_pdf:
                 # If not all pages expected from the PDF were processed, mark as failure for the date.
-                date_has_some_failures = True
+                date_has_any_failures = True
         else:
             logger.warning(f"Failed to download PDF from {pdf_url}. Skipping conversion and upload for this PDF.")
             # If a PDF fails to download, we need to account for its expected pages in the numbering.
-            # We assume the number of pages we tried to pre-check, or 1 if pre-check failed.
+            # We use the number of pages we tried to pre-check, or 1 if pre-check failed.
             for page_idx in range(expected_pages_from_this_pdf):
                 log_missing_page(date, pdf_url, current_output_page_num + page_idx, "PDF download failed. Page likely missing.")
             
             current_output_page_num += expected_pages_from_this_pdf # Advance page number even if PDF download failed
-            date_has_some_failures = True # Mark date as having issues
+            date_has_any_failures = True # Mark date as having issues
 
         time.sleep(0.1) # Polite scraping delay between PDFs
 
     # Return True if no errors were encountered for *any* page/PDF for this date, False otherwise.
-    # The checkpoint will only be saved if this returns True.
-    return not date_has_some_failures
+    return not date_has_any_failures
 
 
 def main():
@@ -379,31 +361,14 @@ def main():
         os.remove(MISSING_PAGES_LOG)
     logger.info(f"Created/Cleared missing pages log: {MISSING_PAGES_LOG}")
 
-
     azure_client = create_azure_storage_client()
     if not azure_client:
         logger.error("Failed to initialize Azure Blob Storage client. Exiting.")
         return
 
-    # --- MODIFIED CHECKPOINT LOADING LOGIC ---
-    loaded_checkpoint_date = load_checkpoint()
-
-    # Define the specific problematic checkpoint date we want to ignore.
-    # Since load_checkpoint() returns the *next* date to start from,
-    # if the checkpoint file contained '2018-06-09', load_checkpoint() would return '2018-06-10'.
-    # So, PROBLEM_CHECKPOINT_DATE should be 2018-06-10.
-    PROBLEM_CHECKPOINT_DATE = datetime(2018, 6, 10)
-
-    if loaded_checkpoint_date == PROBLEM_CHECKPOINT_DATE:
-        start_from_date = START_DATE # Use the script's defined START_DATE (2018-07-03 in your case)
-        logger.info(f"Checkpoint date found is {PROBLEM_CHECKPOINT_DATE.strftime('%Y-%m-%d')}, which is problematic. Overriding to start from: {start_from_date.strftime('%Y-%m-%d')}")
-    elif loaded_checkpoint_date:
-        start_from_date = loaded_checkpoint_date
-        logger.info(f"Resuming from checkpoint: {start_from_date.strftime('%Y-%m-%d')}")
-    else:
-        start_from_date = START_DATE
-        logger.info(f"No valid checkpoint found or checkpoint is problematic. Starting from beginning: {start_from_date.strftime('%Y-%m-%d')}")
-    # --- END MODIFIED CHECKPOINT LOADING LOGIC ---
+    # Always start from START_DATE as checkpoint logic has been removed.
+    start_from_date = START_DATE
+    logger.info(f"Starting from configured START_DATE: {start_from_date.strftime('%Y-%m-%d')}")
 
     # Ensure END_DATE is not before start_from_date, and not in the future.
     effective_end_date = min(END_DATE, datetime.now().replace(hour=0, minute=0, second=0, microsecond=0))
@@ -418,18 +383,8 @@ def main():
     processed_count = 0
     while current_date <= effective_end_date:
         try:
-            # We call scrape_date for each date, it will handle internal errors and keep going
-            # The checkpoint will only be saved if scrape_date returns True (meaning no *new* failures for that date)
-            success = scrape_date(current_date, azure_client)
-            if success:
-                save_checkpoint(current_date) 
-            else:
-                logger.warning(f"Some errors occurred for {current_date.strftime('%Y-%m-%d')}. Details in {MISSING_PAGES_LOG}. Continuing to next date.")
-                # IMPORTANT: Even if there were failures for a date, we still advance the checkpoint
-                # if we have attempted to process all items for that date. This ensures we don't
-                # re-process the same problematic date repeatedly if the issue is non-recoverable
-                # without manual intervention. The missing_pages.log is for post-run analysis.
-                save_checkpoint(current_date) 
+            # Call scrape_date for each date. It handles internal errors and continues.
+            scrape_date(current_date, azure_client)
             
             processed_count += 1
             if processed_count % 10 == 0:
@@ -440,9 +395,8 @@ def main():
 
         except Exception as e:
             logger.error(f"An unexpected error occurred during scraping for {current_date.strftime('%Y-%m-%d')}: {e}")
-            # If a date-level error occurs, we still break.
-            # The goal is to continue on *page/PDF* failures, not on systemic date-processing errors.
-            break 
+            # If a date-level error occurs, we still break to prevent uncontrolled execution.
+            break    
 
         current_date += timedelta(days=1)
 
