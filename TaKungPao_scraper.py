@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 # Constants
 BASE_URL_FORMAT = "http://www.takungpao.com.hk/paper/{date_str}.html"
-START_DATE = datetime(2019, 9, 25) # This is your desired start date
-END_DATE = datetime(2020, 6, 30)
+START_DATE = datetime(2018, 7, 20) # This is your desired start date
+END_DATE = datetime(2018, 11, 3)
 PUBLISHER_NAME = "TaKungPao"
 TEMP_PDF_DIR = "temp_downloads"
 MISSING_PAGES_LOG = "missing_pages.log" # New file for missing pages
